@@ -266,7 +266,7 @@ namespace LittleCalendar
                     if (highestLane >= 1 || (highestLane >= 0 && fixedItems.Count > 0)) { overdueBubble.Width = 10; overdueBubble.Height = 10; overdueBubble.Padding = new Thickness(0); overdueBubble.Margin = new Thickness(0, 1, fixedItems.Count > 0 ? 31 : 18, 0); overdueBubble.HorizontalAlignment = HorizontalAlignment.Right; overdueBubble.Child = null; }
                     System.Windows.Automation.AutomationProperties.SetName(overdueBubble, "逾期待办气泡 " + overdue.Title); Grid.SetRowSpan(overdueBubble, 2); cell.Children.Add(overdueBubble);
                 }
-                var button = UI.Button("", delegate { SelectDate(date); }); button.Content = cell; button.Margin = new Thickness(2); button.Padding = new Thickness(7);
+                var button = UI.Button("", delegate { SelectDate(date); }); button.Content = cell; button.Margin = new Thickness(2); button.Padding = new Thickness(7, 2, 7, 7);
                 button.HorizontalContentAlignment = HorizontalAlignment.Stretch; button.VerticalContentAlignment = VerticalAlignment.Stretch;
                 button.Background = UI.Brush(selected ? "#E2F2EC" : date.Month == VisibleMonth.Month ? "#F8FAF9" : "#FCFDFD");
                 button.BorderBrush = UI.Brush(today ? "#75BCA6" : selected ? "#B0DAC9" : "#F0F4F2"); button.BorderThickness = new Thickness(1);
