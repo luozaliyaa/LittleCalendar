@@ -273,6 +273,22 @@ namespace LittleCalendar
                 button.ToolTip = date.ToString("yyyy年M月d日 dddd", CultureInfo.GetCultureInfo("zh-CN"));
                 System.Windows.Automation.AutomationProperties.SetName(button, date.ToString("yyyy年M月d日"));
                 Grid.SetRow(button, i / 7); Grid.SetColumn(button, i % 7); days.Children.Add(button);
+                if (items.Count > 3) {
+                    DateTime overflowDate = date;
+                    DateTimeOffset current = new DateTimeOffset(clock());
+                    var orderedItems = items.OrderBy(x => x.Completed ? 3 :
+                            x.Deadline != null && Deadlines.End(x.Deadline) <= current.AddHours(24) ? 0 :
+                            x.Important ? 1 : 2)
+                        .ThenBy(x => x.Deadline == null ? x.Date + " " + x.Time : Deadlines.End(x.Deadline).ToString("o"))
+                        .ToList();
+                    var more = UI.Button("+" + (items.Count - 3) + " 条", delegate { SelectDate(overflowDate); });
+                    more.FontSize = 10; more.Height = 23; more.Padding = new Thickness(7, 2, 7, 2);
+                    more.Margin = new Thickness(0, 4, 7, 0); more.HorizontalAlignment = HorizontalAlignment.Right; more.VerticalAlignment = VerticalAlignment.Top;
+                    more.Background = UI.Brush("#FFF1CF"); more.Foreground = UI.Brush("#8A5B16");
+                    more.ToolTip = "当天全部 " + items.Count + " 项：\n" + String.Join("\n", orderedItems.Select(x => "• " + x.Title));
+                    AutomationProperties.SetName(more, "查看" + date.ToString("yyyy年M月d日") + "全部" + items.Count + "项待办");
+                    Grid.SetRow(more, week); Grid.SetColumn(more, column); Panel.SetZIndex(more, 20); days.Children.Add(more);
+                }
             }
             RenderDeadlineBars(start, visualLayout);
             RefreshTasks();

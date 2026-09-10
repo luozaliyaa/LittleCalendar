@@ -931,6 +931,48 @@ internal static class CalendarTests
                 Check(colors.Count == 2, "Different normal deadlines share the same visual color");
             }
         });
+        Test("busy day exposes a clear overflow action and opens every item in the side panel", delegate {
+            DateTime now = new DateTime(2026, 9, 4, 10, 0, 0);
+            DateTime busyDay = new DateTime(2026, 9, 5);
+            var controller = new CalendarController(Store("visual-day-overflow"));
+            for (int i = 1; i <= 5; i++) controller.SaveTodo(new Todo {
+                Id = "busy-" + i,
+                Title = "第" + i + "项安排",
+                Date = Dates.Key(busyDay),
+                Important = i == 5
+            });
+            using (var runtime = new CalendarRuntime(controller, () => now)) {
+                runtime.ShowMain(); Pump();
+                Button more = Find<Button>(runtime.Window, x => AutomationProperties.GetName(x) == "查看2026年9月5日全部5项待办");
+                Check(Equals(more.Content, "+2 条"), "Busy-day overflow does not show the hidden count");
+                Check((more.ToolTip ?? "").ToString().Contains("第1项安排") && (more.ToolTip ?? "").ToString().Contains("第5项安排"), "Busy-day overflow has no complete hover preview");
+                more.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                Check(runtime.Window.SelectedDate == busyDay, "Busy-day overflow did not select its date");
+                Check(Descendants(runtime.Window).OfType<Border>().Count(x => (AutomationProperties.GetName(x) ?? "").StartsWith("待办卡片 ")) == 5, "Side panel did not open every busy-day item");
+            }
+        });
+        Test("busy-day overflow action stays clear of stacked deadline bars", delegate {
+            DateTime now = new DateTime(2026, 9, 4, 10, 0, 0);
+            var controller = new CalendarController(Store("visual-day-overflow-lanes"));
+            for (int i = 0; i < 3; i++) {
+                Todo deadline = DeadlineTask("2026-09-05T1" + i + ":00:00+08:00", 72);
+                deadline.Id = "overflow-lane-" + i; controller.SaveTodo(deadline);
+            }
+            controller.SaveTodo(new Todo { Id = "overflow-fixed", Title = "准备面试资料", Date = "2026-09-05" });
+            using (var runtime = new CalendarRuntime(controller, () => now)) {
+                runtime.ShowMain(); Pump();
+                Button more = Find<Button>(runtime.Window, x => AutomationProperties.GetName(x) == "查看2026年9月5日全部4项待办");
+                Point moreTop = more.TranslatePoint(new Point(), runtime.Window);
+                var bars = Descendants(runtime.Window).OfType<Button>()
+                    .Where(x => (AutomationProperties.GetName(x) ?? "").StartsWith("期限横条 ") && Grid.GetRow(x) == 0)
+                    .ToList();
+                Check(bars.Count == 3, "Expected three stacked deadline bars on the busy day");
+                Check(bars.All(bar => {
+                    Point barTop = bar.TranslatePoint(new Point(), runtime.Window);
+                    return moreTop.Y + more.ActualHeight <= barTop.Y || barTop.Y + bar.ActualHeight <= moreTop.Y;
+                }), "Busy-day overflow action covers a deadline bar");
+            }
+        });
         Test("visual layout type exists for lane and overflow behavior", delegate {
             Type visuals = Type.GetType("LittleCalendar.CalendarVisuals, LittleCalendar");
             Check(visuals != null, "Calendar visual layout is missing");
