@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore dependencies
+        shell: powershell
+        run: .\restore-packages.ps1
+      - name: Build and run tests
+        shell: powershell
+        run: .\build.ps1 -Test -OutputDirectory test-output
+      - name: Check repository hygiene
+        shell: powershell
+        run: .\scripts\Test-RepositoryHygiene.ps1
+      - name: Package application
+        shell: powershell
+        run: .\scripts\New-ReleasePackage.ps1 -InputDirectory .\test-output -OutputDirectory .\artifacts
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/LittleCalendar-Windows-x64.zip

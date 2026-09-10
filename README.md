@@ -1,0 +1,109 @@
+# LittleCalendar（小日历）
+
+一款面向 Windows 的本地日历与待办工具，适合管理秋招投递、笔试、测评、面试和材料提交等事项。
+
+它可以手动记录待办，也可以在你主动配置后读取 163 邮箱，通过 DeepSeek 把招聘邮件分成“待办”“机会通知”或“忽略”。数据默认保存在本机，不需要注册账号或部署服务器。
+
+## 主要功能
+
+- 月历与每日待办：支持搜索、重要标记、完成状态、回收站和桌面提醒。
+- 跨日期期限：支持“邮件收到后 48 小时内”“两天内”“工作日内”等期限，显示连续期限条、剩余时间和临期提醒。
+- DeepSeek 智能整理：总结今天、未来两周及已逾期的未完成事项。
+- 163 邮箱同步：首次可读取最近 1、3、7、14 或 30 天，之后只增量同步并补扫最近邮件。
+- 招聘邮件分流：真正需要你处理的邮件进入日历；岗位推荐、校招宣传等集中进入“机会通知”；验证码和广告忽略。
+- 安全去重：同一测评或面试的重复提醒不会反复创建；已完成事项不会被催办邮件重新生成。
+- 邮件联动：邮件待办保存来源信息，可从待办打开 163 网页邮箱并复制原主题以便定位；完成待办后，下次同步将原邮件设为已读并取消星标。
+- 本地备份：日历数据支持导出和恢复，敏感密钥不进入备份。
+
+## 下载与运行
+
+1. 在仓库右侧的 **Releases** 中下载 `LittleCalendar-Windows-x64.zip`。
+2. 完整解压压缩包，不要只把 EXE 单独拖出来。
+3. 双击 `LittleCalendar.exe`。
+
+支持 Windows 10/11，需要 .NET Framework 4.6.2 或更高版本。关闭主窗口后程序会留在系统托盘；需要完全退出时，请使用托盘菜单中的“退出”。
+
+> 首次运行若出现 Windows 安全提示，请核对下载来源和发布页校验值。本项目当前没有商业代码签名证书。
+
+## 使用 DeepSeek
+
+在“提醒设置”中填写 DeepSeek API Key，默认模型为 `deepseek-v4-flash`。建议先点击“测试连接”，成功后再启用智能整理或邮箱同步。
+
+API Key 使用 Windows 当前用户的数据保护机制加密，保存在：
+
+```text
+%LOCALAPPDATA%\LittleCalendar\deepseek-key.dat
+```
+
+设置页不会回显已保存的 Key，日志和导出备份也不会包含它。
+
+## 连接 163 邮箱
+
+1. 登录 163 网页邮箱，进入“设置”并开启 IMAP/SMTP。
+2. 按网易提示生成“客户端授权码”。授权码不是网页登录密码。
+3. 在小日历的“提醒设置”中填写完整的 `@163.com` 邮箱地址、`imap.163.com`、SSL 端口 `993` 和授权码。
+4. 点击“测试邮箱连接”。测试成功后选择需要同步的文件夹。
+5. 选择同步天数，点击“立即同步邮件”；确认结果正常后再开启每日自动同步。
+
+默认可读取收件箱、垃圾邮件、订阅邮件和自建文件夹，排除已发送、草稿和已删除邮件。程序不会发送、移动或删除邮件。创建邮件待办后会给原邮件加星；待办完成后，下次同步只会把原邮件设为已读并取消星标。
+
+若同步异常，可从设置页打开邮箱日志目录：
+
+- `mail-connection.log`：连接、认证、IMAP ID 和文件夹发现。
+- `mail-read.log`：检索范围、命中数量、UID、时间、发件人和主题。
+- `mail-ai.log`：预筛选、DeepSeek 请求耗时、分类结果、去重和写入结果。
+
+日志不会记录授权码、DeepSeek Key、邮件正文或完整模型输出。提交问题前仍请检查并遮盖个人邮箱地址、公司信息和邮件主题。
+
+## 邮件分析与隐私
+
+邮箱同步只在你配置并启用后运行。进行邮件分类时，邮件主题、发件人、正文文本、日历邀请和附件文件名会发送给你配置的 DeepSeek API；附件正文、远程图片和网页脚本不会读取。日历智能总结只发送近期事项的标题、时间、重要性和备注。
+
+邮件和模型输出都被视为不可信输入。程序要求 DeepSeek 返回固定 JSON Schema，并在本地校验后才写入日历；邮件正文中的指令不会获得程序权限。尽管如此，自动判断仍可能出错，请在执行招聘任务前核对原邮件。
+
+本地数据位置：
+
+```text
+%LOCALAPPDATA%\LittleCalendar\calendar.json
+%LOCALAPPDATA%\LittleCalendar\calendar.json.bak
+%LOCALAPPDATA%\LittleCalendar\mail-sync.json
+```
+
+邮箱授权码保存在 `netease-mail-key.dat`，同样使用 Windows 当前用户加密。请勿把上述目录、密钥、日志或真实邮件样本提交到 GitHub。
+
+## 从源码构建
+
+在 Windows PowerShell 中运行：
+
+```powershell
+.\restore-packages.ps1
+.\build.ps1 -Test -OutputDirectory test-output
+```
+
+首次恢复依赖需要联网。测试使用隔离的临时数据，不应读取 `%LOCALAPPDATA%\LittleCalendar` 中的个人资料。
+
+生成发布压缩包：
+
+```powershell
+.\scripts\New-ReleasePackage.ps1 -InputDirectory .\test-output -OutputDirectory .\artifacts
+```
+
+## 项目结构
+
+- `Program.cs`、`Desktop.cs`、`CalendarVisuals.cs`：WPF 界面、交互、托盘和提醒。
+- `Model.cs`、`Deadlines.cs`、`DeadlineFields.cs`：本地数据、期限计算与兼容迁移。
+- `Agent.cs`：DeepSeek 智能整理。
+- `MailClient.cs`、`MailAnalysis.cs`、`MailSync.cs`：IMAP、结构化邮件分析、分流与去重。
+- `MailStore.cs`、`MailDiagnostics.cs`：邮箱同步状态和脱敏日志。
+- `Tests.cs`：不依赖真实账号的自动化测试。
+- `AGENTS.md`：供 Codex 和其他开发者使用的仓库约束与验收规则。
+
+## 已知限制
+
+- 目前仅支持 163 邮箱 IMAP，未提供 Outlook、QQ 邮箱或 Gmail 的专用适配。
+- IMAP 不提供网易网页版单封邮件的稳定公开链接，因此“打开原邮件”会打开网页邮箱并复制主题，需要在搜索框粘贴定位。
+- “工作日”受节假日、调休和招聘方规则影响，程序不会自动猜测，必须人工核实截止时间。
+- 程序在完全退出或电脑关机期间不能实时弹窗，重新运行后会补发仍有意义的提醒。
+- DeepSeek 或邮件服务不可用时，手动待办和本地日历仍可使用。
+
+欢迎阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 参与开发。项目采用 [MIT License](LICENSE)。

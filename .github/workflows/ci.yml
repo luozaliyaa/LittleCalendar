@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore dependencies
+        shell: powershell
+        run: .\restore-packages.ps1
+      - name: Build and run tests
+        shell: powershell
+        run: .\build.ps1 -Test -OutputDirectory test-output
+      - name: Check repository hygiene
+        shell: powershell
+        run: .\scripts\Test-RepositoryHygiene.ps1
