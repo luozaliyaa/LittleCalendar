@@ -17,3 +17,4 @@ netease-mail-key.dat
 *.user
 *.suo
 .vs/
+.worktrees/
