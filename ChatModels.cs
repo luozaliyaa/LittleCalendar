@@ -38,18 +38,33 @@ namespace LittleCalendar
 
     public sealed class ChatMessage
     {
+        private string text;
+        private bool safeDisplay;
         public string Id { get; set; }
         public string Role { get; set; }
-        public string Text { get; set; }
+        public string Text
+        {
+            get { return text; }
+            set { text = value; safeDisplay = false; }
+        }
         public string CreatedAt { get; set; }
         public string Intent { get; set; }
         public List<string> TodoIds { get; set; }
         public ChatSyncSummary Sync { get; set; }
         public ChatMessage()
         {
-            Id = ""; Role = ""; Text = ""; CreatedAt = ""; Intent = "";
+            Id = ""; Role = ""; text = ""; CreatedAt = ""; Intent = "";
             TodoIds = new List<string>();
         }
+        public static ChatMessage CreateSafeDisplay(string id, string role, string displayText, string createdAt, string intent = "", List<string> todoIds = null, ChatSyncSummary sync = null)
+        {
+            return new ChatMessage {
+                Id = id, Role = role, text = displayText, safeDisplay = true, CreatedAt = createdAt, Intent = intent,
+                TodoIds = todoIds ?? new List<string>(), Sync = sync
+            };
+        }
+        internal bool HasSafeDisplay { get { return safeDisplay; } }
+        internal void MarkSafeDisplay() { safeDisplay = true; }
     }
 
     public sealed class ChatHistory

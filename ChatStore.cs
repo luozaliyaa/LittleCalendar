@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Web.Script.Serialization;
+using System.Text.RegularExpressions;
 
 namespace LittleCalendar
 {
@@ -22,6 +23,7 @@ namespace LittleCalendar
 
         public ChatHistory Load()
         {
+            LoadWarning = "";
             if (!File.Exists(FilePath)) return new ChatHistory();
             try { return Decode(File.ReadAllText(FilePath, Encoding.UTF8)); }
             catch (Exception primaryError) {
@@ -29,7 +31,7 @@ namespace LittleCalendar
                 if (File.Exists(backup)) {
                     try {
                         ChatHistory recovered = Decode(File.ReadAllText(backup, Encoding.UTF8));
-                        File.Copy(FilePath, FilePath + ".damaged-" + DateTime.Now.ToString("yyyyMMddHHmmss"), false);
+                        File.Copy(FilePath, FilePath + ".damaged-" + Guid.NewGuid().ToString("N"), false);
                         LoadWarning = "对话记录异常，已读取上次备份；原文件已保留。";
                         return recovered;
                     } catch (Exception backupError) {
@@ -42,7 +44,7 @@ namespace LittleCalendar
 
         public void Save(ChatHistory history)
         {
-            ChatHistory normalized = Decode(serializer.Serialize(history));
+            ChatHistory normalized = Decode(serializer.Serialize(Project(history)));
             normalized.Messages = normalized.Messages.Skip(Math.Max(0, normalized.Messages.Count - 50)).ToList();
             string json = serializer.Serialize(normalized);
             string directory = Path.GetDirectoryName(FilePath);
@@ -67,8 +69,86 @@ namespace LittleCalendar
             ChatHistory history = serializer.Deserialize<ChatHistory>(json);
             if (history == null || history.Version != 1) throw new InvalidDataException("不支持或损坏的对话记录格式。");
             if (history.Messages == null) history.Messages = new List<ChatMessage>();
-            foreach (ChatMessage message in history.Messages) Normalize(message);
+            foreach (ChatMessage message in history.Messages) { Normalize(message); message.MarkSafeDisplay(); }
             return history;
+        }
+
+        private static ChatHistory Project(ChatHistory history)
+        {
+            if (history == null || history.Version != 1) throw new InvalidDataException("不支持或损坏的对话记录格式。");
+            var projected = new ChatHistory { Version = 1, Messages = new List<ChatMessage>() };
+            foreach (ChatMessage message in history.Messages ?? new List<ChatMessage>()) projected.Messages.Add(Project(message));
+            return projected;
+        }
+
+        private static ChatMessage Project(ChatMessage message)
+        {
+            if (message == null) throw new InvalidDataException("对话消息无效。");
+            var projected = new ChatMessage {
+                Id = ProjectId(message.Id, message.HasSafeDisplay), Role = message.Role, CreatedAt = message.CreatedAt,
+                Intent = ProjectIntent(message.Intent), TodoIds = ProjectTodoIds(message.TodoIds), Sync = ProjectSync(message.Sync)
+            };
+            projected.Text = message.HasSafeDisplay ? ProjectDisplayText(message.Text) : "[已省略未确认的对话内容]";
+            projected.MarkSafeDisplay();
+            return projected;
+        }
+
+        private static string ProjectId(string value, bool trusted)
+        {
+            Guid id;
+            return trusted && Guid.TryParseExact(value, "N", out id) ? id.ToString("N") : Guid.NewGuid().ToString("N");
+        }
+
+        private static string ProjectDisplayText(string value)
+        {
+            value = (value ?? "").Trim();
+            if (value.Length > 4000) value = value.Substring(0, 4000);
+            return IsSafeLabel(value, 4000) ? value : "[已省略不安全的对话内容]";
+        }
+
+        private static string ProjectIntent(string value)
+        {
+            value = (value ?? "").Trim().ToLowerInvariant();
+            return new[] { "", "sync_mail_incremental", "list_tasks", "chat" }.Contains(value) ? value : "";
+        }
+
+        private static List<string> ProjectTodoIds(List<string> todoIds)
+        {
+            return (todoIds ?? new List<string>()).Select(value => {
+                Guid id;
+                return Guid.TryParseExact(value, "N", out id) ? id.ToString("N") : "";
+            }).Where(value => value.Length > 0).Distinct(StringComparer.Ordinal).Take(50).ToList();
+        }
+
+        private static ChatSyncSummary ProjectSync(ChatSyncSummary sync)
+        {
+            if (sync == null) return null;
+            var projected = new ChatSyncSummary {
+                PreviousCompletedAt = sync.PreviousCompletedAt, StartedAt = sync.StartedAt, CompletedAt = sync.CompletedAt,
+                ScannedCount = Math.Max(0, sync.ScannedCount), CreatedCount = Math.Max(0, sync.CreatedCount), NoticeCount = Math.Max(0, sync.NoticeCount),
+                IgnoredCount = Math.Max(0, sync.IgnoredCount), ErrorCount = Math.Max(0, sync.ErrorCount), Folders = new List<ChatFolderCursorSummary>()
+            };
+            foreach (ChatFolderCursorSummary folder in (sync.Folders ?? new List<ChatFolderCursorSummary>()).Where(folder => folder != null).Take(50)) {
+                projected.Folders.Add(new ChatFolderCursorSummary {
+                    DisplayName = ProjectLabel(folder.DisplayName, 100), PreviousScannedAt = folder.PreviousScannedAt, CompletedAt = folder.CompletedAt,
+                    PreviousUid = folder.PreviousUid, RequestedMinimumUid = folder.RequestedMinimumUid, FinalUid = folder.FinalUid,
+                    FetchedCount = Math.Max(0, folder.FetchedCount), Error = String.IsNullOrWhiteSpace(folder.Error) ? "" : "同步出错"
+                });
+            }
+            return projected;
+        }
+
+        private static string ProjectLabel(string value, int maximumLength)
+        {
+            value = (value ?? "").Trim();
+            return IsSafeLabel(value, maximumLength) ? value : "";
+        }
+
+        private static bool IsSafeLabel(string value, int maximumLength)
+        {
+            if (String.IsNullOrWhiteSpace(value) || value.Length > maximumLength || value.IndexOfAny(new[] { '\r', '\n' }) >= 0) return false;
+            if (Regex.IsMatch(value, @"(?i)(secret|authorization|password|api[ _-]?key|message-id|system:|prompt|choices)")) return false;
+            return !Regex.IsMatch(value, @"<[^>]+@[^>]+>|\{\s*");
         }
 
         private static void Normalize(ChatMessage message)
