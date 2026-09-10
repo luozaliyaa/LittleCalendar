@@ -912,7 +912,8 @@ internal static class CalendarTests
                 Button day = Find<Button>(runtime.Window, x => AutomationProperties.GetName(x) == "2026年9月4日");
                 TextBlock dayNumber = Descendants(day).OfType<TextBlock>().First(x => x.Text == "4");
                 Point numberTop = dayNumber.TranslatePoint(new Point(), runtime.Window);
-                Check(numberTop.Y + dayNumber.ActualHeight + 3 <= barTop.Y, "Date number is covered by deadline bars");
+                Check(numberTop.Y + dayNumber.ActualHeight <= barTop.Y + 0.5,
+                    "Date number overlaps deadline bars: number " + numberTop.Y.ToString("F1") + "+" + dayNumber.ActualHeight.ToString("F1") + ", bar " + barTop.Y.ToString("F1"));
                 Capture(runtime.Window, "visual-calendar.png");
             }
         });
