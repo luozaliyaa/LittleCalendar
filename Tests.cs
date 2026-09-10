@@ -205,28 +205,31 @@ internal static class CalendarTests
         });
         Test("chat history retains the newest fifty messages in chronological order", delegate {
             var store = new ChatHistoryStore(Path.Combine(root, "chat-retention"));
+            var expectedIds = new List<string>();
             for (int index = 1; index <= 55; index++) {
-                store.Append(ChatMessage.CreateSafeDisplay(Guid.NewGuid().ToString("N"), index % 2 == 0 ? "assistant" : "user", "message " + index,
+                string id = Guid.NewGuid().ToString("N"); expectedIds.Add(id);
+                store.Append(ChatMessage.CreateSafeDisplay(id, index % 2 == 0 ? "assistant" : "user", "message " + index,
                     new DateTimeOffset(2026, 9, 10, 8, index, 0, TimeSpan.FromHours(8)).ToString("o", CultureInfo.InvariantCulture)));
             }
             ChatHistory history = store.Load();
             Check(history.Version == 1 && history.Messages.Count == 50, "Chat history did not retain exactly fifty messages");
             for (int index = 0; index < history.Messages.Count; index++) {
                 int expected = index + 6;
-                Check(history.Messages[index].Text == "message " + expected,
+                Check(history.Messages[index].Id == expectedIds[expected - 1],
                     "Chat history did not preserve chronological retention at message " + expected);
             }
         });
         Test("chat history recovers the prior backup after primary JSON corruption", delegate {
             string directory = Path.Combine(root, "chat-recovery");
             var store = new ChatHistoryStore(directory);
-            store.Append(ChatMessage.CreateSafeDisplay(Guid.NewGuid().ToString("N"), "user", "first retained message", "2026-09-10T08:00:00+08:00"));
+            string firstId = Guid.NewGuid().ToString("N");
+            store.Append(ChatMessage.CreateSafeDisplay(firstId, "user", "first retained message", "2026-09-10T08:00:00+08:00"));
             store.Append(ChatMessage.CreateSafeDisplay(Guid.NewGuid().ToString("N"), "assistant", "second retained message", "2026-09-10T08:01:00+08:00"));
             File.WriteAllText(Path.Combine(directory, "chat-history.json"), "{broken");
             ChatHistory recovered = store.Load();
-            Check(recovered.Messages.Count == 1 && recovered.Messages.Single().Text == "first retained message", "Chat history did not recover the prior valid backup");
+            Check(recovered.Messages.Count == 1 && recovered.Messages.Single().Id == firstId, "Chat history did not recover the prior valid backup");
             Check(Directory.GetFiles(directory, "chat-history.json.damaged-*").Length == 1, "Damaged chat history was not preserved");
-            Check(store.Load().Messages.Single().Text == "first retained message" && Directory.GetFiles(directory, "chat-history.json.damaged-*").Length == 2,
+            Check(store.Load().Messages.Single().Id == firstId && Directory.GetFiles(directory, "chat-history.json.damaged-*").Length == 2,
                 "Repeated recovery in the same second did not preserve a second damaged primary");
             store.Save(recovered);
             store.Load();
@@ -252,6 +255,29 @@ internal static class CalendarTests
             string json = File.ReadAllText(Path.Combine(directory, "chat-history.json"));
             Check(!json.Contains("deepseek-secret") && !json.Contains("mail-auth-code") && !json.Contains(rawMailBody) && !json.Contains(fullPrompt) && !json.Contains(rawModelResponse),
                 "Chat history serialized untrusted credentials, mail content, prompt, or model output");
+        });
+        Test("chat history never persists ordinary raw text supplied through its display factory", delegate {
+            string directory = Path.Combine(root, "chat-safe-factory");
+            string rawOrdinaryProse = "The complete unfiltered reply says that the applicant should contact the coordinator before Friday.";
+            var store = new ChatHistoryStore(directory);
+            store.Append(ChatMessage.CreateSafeDisplay(Guid.NewGuid().ToString("N"), "assistant", rawOrdinaryProse, "2026-09-10T08:00:00+08:00", "chat"));
+            Check(!File.ReadAllText(Path.Combine(directory, "chat-history.json")).Contains(rawOrdinaryProse),
+                "Chat display factory allowed ordinary raw prose into persistence");
+        });
+        Test("chat history reprojects legacy raw JSON before returning or saving it", delegate {
+            string directory = Path.Combine(root, "chat-legacy-projection");
+            string rawOrdinaryProse = "The complete ordinary mail prose asks the applicant to join a private interview meeting on Friday.";
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, "chat-history.json"), new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new {
+                Version = 1,
+                Messages = new[] { new { Id = Guid.NewGuid().ToString("N"), Role = "assistant", Text = rawOrdinaryProse, CreatedAt = "2026-09-10T08:00:00+08:00", Intent = "chat" } }
+            }));
+            var store = new ChatHistoryStore(directory);
+            ChatHistory history = store.Load();
+            Check(history.Messages.Single().Text != rawOrdinaryProse, "Legacy raw JSON was trusted as display content during load");
+            store.Save(history);
+            Check(!File.ReadAllText(Path.Combine(directory, "chat-history.json")).Contains(rawOrdinaryProse),
+                "Legacy raw JSON was written back as trusted display content");
         });
         Test("chat history rejects invalid roles, normalizes timestamps, and clears stored messages", delegate {
             string directory = Path.Combine(root, "chat-validation");

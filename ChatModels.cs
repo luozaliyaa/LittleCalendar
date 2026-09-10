@@ -38,33 +38,34 @@ namespace LittleCalendar
 
     public sealed class ChatMessage
     {
-        private string text;
-        private bool safeDisplay;
         public string Id { get; set; }
         public string Role { get; set; }
-        public string Text
-        {
-            get { return text; }
-            set { text = value; safeDisplay = false; }
-        }
+        public string Text { get; set; }
         public string CreatedAt { get; set; }
         public string Intent { get; set; }
         public List<string> TodoIds { get; set; }
         public ChatSyncSummary Sync { get; set; }
         public ChatMessage()
         {
-            Id = ""; Role = ""; text = ""; CreatedAt = ""; Intent = "";
+            Id = ""; Role = ""; Text = ""; CreatedAt = ""; Intent = "";
             TodoIds = new List<string>();
         }
         public static ChatMessage CreateSafeDisplay(string id, string role, string displayText, string createdAt, string intent = "", List<string> todoIds = null, ChatSyncSummary sync = null)
         {
             return new ChatMessage {
-                Id = id, Role = role, text = displayText, safeDisplay = true, CreatedAt = createdAt, Intent = intent,
+                Id = id, Role = role, Text = DisplaySummary(role, intent), CreatedAt = createdAt, Intent = intent,
                 TodoIds = todoIds ?? new List<string>(), Sync = sync
             };
         }
-        internal bool HasSafeDisplay { get { return safeDisplay; } }
-        internal void MarkSafeDisplay() { safeDisplay = true; }
+        internal static string DisplaySummary(string role, string intent)
+        {
+            role = (role ?? "").Trim().ToLowerInvariant(); intent = (intent ?? "").Trim().ToLowerInvariant();
+            if (role == "user") return "已保存用户消息";
+            if (role == "system") return "已保存系统消息";
+            if (intent == "sync_mail_incremental") return "已完成邮箱增量同步";
+            if (intent == "list_tasks") return "已完成任务查询";
+            return "已保存助手消息";
+        }
     }
 
     public sealed class ChatHistory
