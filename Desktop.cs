@@ -282,8 +282,8 @@ namespace LittleCalendar
                         .ThenBy(x => x.Deadline == null ? x.Date + " " + x.Time : Deadlines.End(x.Deadline).ToString("o"))
                         .ToList();
                     var more = UI.Button("+" + (items.Count - 3) + " 条", delegate { SelectDate(overflowDate); });
-                    more.FontSize = 10; more.Height = 23; more.Padding = new Thickness(7, 2, 7, 2);
-                    more.Margin = new Thickness(0, 4, 7, 0); more.HorizontalAlignment = HorizontalAlignment.Right; more.VerticalAlignment = VerticalAlignment.Top;
+                    more.FontSize = 9; more.Height = 16; more.Padding = new Thickness(4, 0, 4, 0);
+                    more.Margin = new Thickness(0, 2, 7, 0); more.HorizontalAlignment = HorizontalAlignment.Right; more.VerticalAlignment = VerticalAlignment.Top;
                     more.Background = UI.Brush("#FFF1CF"); more.Foreground = UI.Brush("#8A5B16");
                     more.ToolTip = "当天全部 " + items.Count + " 项：\n" + String.Join("\n", orderedItems.Select(x => "• " + x.Title));
                     AutomationProperties.SetName(more, "查看" + date.ToString("yyyy年M月d日") + "全部" + items.Count + "项待办");
