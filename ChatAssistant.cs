@@ -97,13 +97,13 @@ namespace LittleCalendar
                 if (todo.Deadline != null) {
                     instant = Deadlines.End(todo.Deadline);
                     date = instant.LocalDateTime.Date;
-                    overdue = instant <= current;
+                    overdue = instant < current;
                 } else {
                     date = Dates.Parse(todo.Date).Date;
-                    DateTime scheduled = date;
-                    if (Dates.IsTime(todo.Time)) scheduled = date.Add(Dates.Time(todo.Time));
+                    bool hasTime = Dates.IsTime(todo.Time);
+                    DateTime scheduled = hasTime ? date.Add(Dates.Time(todo.Time)) : date;
                     instant = new DateTimeOffset(scheduled);
-                    overdue = date < current.LocalDateTime.Date;
+                    overdue = hasTime ? instant < current : date < current.LocalDateTime.Date;
                 }
                 result = new QueryItem { Todo = todo, DueDate = date, DueInstant = instant, IsOverdue = overdue };
                 return true;
@@ -117,6 +117,7 @@ namespace LittleCalendar
             return items.OrderBy(item => item.DueInstant)
                 .ThenByDescending(item => item.Todo.Important)
                 .ThenBy(item => item.Todo.Title ?? "", StringComparer.Ordinal)
+                .ThenBy(item => item.Todo.Id ?? "", StringComparer.Ordinal)
                 .ToList();
         }
 

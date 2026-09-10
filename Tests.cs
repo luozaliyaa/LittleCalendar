@@ -365,6 +365,27 @@ internal static class CalendarTests
             Check(sevenDays.DeterministicText.Contains("逾期截止") && sevenDays.DeterministicText.Contains("七日内跨日截止"),
                 "Task query did not create deterministic local result text");
         });
+        Test("task query keeps a deadline at the current instant in the due list", delegate {
+            DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
+            var data = new CalendarData();
+            data.Items.Add(new Todo { Title = "恰好截止", Date = "2026-09-10",
+                Deadline = new DeadlineSpec { StartAt = "2026-09-10T11:00:00+08:00", Amount = 1, Unit = "hours", Confirmed = true } });
+            TaskQueryResult result = TaskQueryService.Query(data, now, TaskQueryRange.Today);
+            Check(result.Overdue.Count == 0 && result.Due.Select(item => item.Title).SequenceEqual(new[] { "恰好截止" }),
+                "A deadline equal to the current instant was incorrectly classified as overdue");
+        });
+        Test("task query uses ordinary todo times without expiring all-day today items", delegate {
+            DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
+            var data = new CalendarData();
+            data.Items.Add(new Todo { Title = "今天较早定时", Date = "2026-09-10", Time = "09:00" });
+            data.Items.Add(new Todo { Title = "今天较晚定时", Date = "2026-09-10", Time = "15:00" });
+            data.Items.Add(new Todo { Title = "今天全天", Date = "2026-09-10", Time = "" });
+            TaskQueryResult result = TaskQueryService.Query(data, now, TaskQueryRange.Today);
+            Check(result.Overdue.Select(item => item.Title).SequenceEqual(new[] { "今天较早定时" }),
+                "A timed ordinary todo before now was not classified as overdue");
+            Check(result.Due.Select(item => item.Title).SequenceEqual(new[] { "今天全天", "今天较晚定时" }),
+                "Future timed or all-day ordinary todos today were not kept in the due list");
+        });
         Test("task query caps model-facing items after deterministic overdue ordering", delegate {
             DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
             var data = new CalendarData();
@@ -376,6 +397,15 @@ internal static class CalendarTests
             Check(result.Overdue.Count == 1 && result.Due.Count == 49, "Task query did not cap combined model-facing items at fifty");
             Check(result.Overdue.Single().Title == "逾期任务" && result.Due.First().Title == "普通任务 50",
                 "Task query did not keep overdue status, importance, and title ordering deterministic");
+        });
+        Test("task query caps tied items by ordinal todo identifier instead of storage order", delegate {
+            DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
+            var data = new CalendarData();
+            for (int index = 50; index >= 0; index--)
+                data.Items.Add(new Todo { Id = "task-" + index.ToString("D2"), Title = "同名同日任务", Date = "2026-09-10" });
+            TaskQueryResult result = TaskQueryService.Query(data, now, TaskQueryRange.Today);
+            Check(result.Due.Count == 50 && result.Due.First().Id == "task-00" && result.Due.Last().Id == "task-49",
+                "The fifty-item cap depended on input storage order when due, importance, and title tied");
         });
         Test("mail sync state recovers its backup and never contains the authorization code", delegate {
             string directory = Path.Combine(root, "mail-state");
