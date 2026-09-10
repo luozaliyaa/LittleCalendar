@@ -308,6 +308,75 @@ internal static class CalendarTests
                 isNormalizedTimestamp(sync.Folders.Single().PreviousScannedAt) && isNormalizedTimestamp(sync.Folders.Single().CompletedAt),
                 "Chat sync timestamps were not normalized to ISO 8601 offset values");
         });
+        Test("chat intent router recognizes exact and natural sync and task requests", delegate {
+            ChatIntent readMail = ChatIntentRouter.Parse("读取新邮件");
+            ChatIntent naturalReadMail = ChatIntentRouter.Parse("收取一下新邮件");
+            ChatIntent syncMailbox = ChatIntentRouter.Parse("  同步 一下 邮箱  ");
+            ChatIntent naturalMailbox = ChatIntentRouter.Parse("帮我同步一下收件箱");
+            ChatIntent today = ChatIntentRouter.Parse("今天要做什么");
+            ChatIntent naturalToday = ChatIntentRouter.Parse("今天有哪些安排");
+            ChatIntent tomorrow = ChatIntentRouter.Parse("明天截止");
+            ChatIntent naturalTomorrow = ChatIntentRouter.Parse("明天有哪些截止事项");
+            ChatIntent sevenDays = ChatIntentRouter.Parse("未来 七 天");
+            ChatIntent naturalSevenDays = ChatIntentRouter.Parse("接下来一周");
+            ChatIntent mixed = ChatIntentRouter.Parse("读取新邮件，然后今天要做什么");
+            ChatIntent unrelated = ChatIntentRouter.Parse("帮我写一段自我介绍");
+            Check(readMail.Kind == ChatIntentKind.SyncMailIncremental && naturalReadMail.Kind == ChatIntentKind.SyncMailIncremental &&
+                syncMailbox.Kind == ChatIntentKind.SyncMailIncremental && naturalMailbox.Kind == ChatIntentKind.SyncMailIncremental,
+                "Explicit mailbox sync phrases were not routed to local incremental sync");
+            Check(today.Kind == ChatIntentKind.ListTasks && today.Range == TaskQueryRange.Today &&
+                naturalToday.Kind == ChatIntentKind.ListTasks && naturalToday.Range == TaskQueryRange.Today,
+                "Today's task request was not routed with the today range");
+            Check(tomorrow.Kind == ChatIntentKind.ListTasks && tomorrow.Range == TaskQueryRange.Tomorrow &&
+                naturalTomorrow.Kind == ChatIntentKind.ListTasks && naturalTomorrow.Range == TaskQueryRange.Tomorrow,
+                "Tomorrow deadline request was not routed with the tomorrow range");
+            Check(sevenDays.Kind == ChatIntentKind.ListTasks && sevenDays.Range == TaskQueryRange.SevenDays &&
+                naturalSevenDays.Kind == ChatIntentKind.ListTasks && naturalSevenDays.Range == TaskQueryRange.SevenDays,
+                "Future seven-day request was not routed with the seven-day range");
+            Check(mixed.Kind == ChatIntentKind.SyncMailIncremental,
+                "Explicit mailbox sync did not take precedence over a task phrase");
+            Check(unrelated.Kind == ChatIntentKind.Chat, "Unrelated text did not remain chat");
+        });
+        Test("task query uses deadline instants and excludes inactive calendar items", delegate {
+            DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
+            var data = new CalendarData();
+            data.Items.Add(new Todo { Title = "逾期截止", Date = "2026-09-10", Important = false,
+                Deadline = new DeadlineSpec { StartAt = "2026-09-09T08:00:00+08:00", Amount = 24, Unit = "hours", Confirmed = true } });
+            data.Items.Add(new Todo { Title = "今日截止", Date = "2026-09-10", Important = true,
+                Deadline = new DeadlineSpec { StartAt = "2026-09-10T06:00:00+08:00", Amount = 12, Unit = "hours", Confirmed = true } });
+            data.Items.Add(new Todo { Title = "明日普通待办", Date = "2026-09-11", Time = "09:00", Important = true });
+            data.Items.Add(new Todo { Title = "七日内跨日截止", Date = "2026-09-16", Important = false,
+                Deadline = new DeadlineSpec { StartAt = "2026-09-09T23:00:00+08:00", Amount = 168, Unit = "hours", Confirmed = true } });
+            data.Items.Add(new Todo { Title = "已完成", Date = "2026-09-10", Completed = true });
+            data.Items.Add(new Todo { Title = "已删除", Date = "2026-09-10", Deleted = true });
+            TaskQueryResult today = TaskQueryService.Query(data, now, TaskQueryRange.Today);
+            TaskQueryResult tomorrow = TaskQueryService.Query(data, now, TaskQueryRange.Tomorrow);
+            TaskQueryResult sevenDays = TaskQueryService.Query(data, now, TaskQueryRange.SevenDays);
+            Check(today.Overdue.Select(item => item.Title).SequenceEqual(new[] { "逾期截止" }),
+                "A past deadline instant was not classified as overdue");
+            Check(today.Due.Select(item => item.Title).SequenceEqual(new[] { "今日截止" }),
+                "Today's deadline instant was not included in today's due list");
+            Check(tomorrow.Due.Select(item => item.Title).SequenceEqual(new[] { "明日普通待办" }),
+                "Tomorrow's ordinary todo was not included in tomorrow's due list");
+            Check(sevenDays.Due.Select(item => item.Title).SequenceEqual(new[] { "今日截止", "明日普通待办", "七日内跨日截止" }),
+                "Seven-day query did not use the deadline end date or deterministic due ordering");
+            Check(!sevenDays.Overdue.Concat(sevenDays.Due).Any(item => item.Title == "已完成" || item.Title == "已删除"),
+                "Completed or deleted items leaked into the local task query");
+            Check(sevenDays.DeterministicText.Contains("逾期截止") && sevenDays.DeterministicText.Contains("七日内跨日截止"),
+                "Task query did not create deterministic local result text");
+        });
+        Test("task query caps model-facing items after deterministic overdue ordering", delegate {
+            DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
+            var data = new CalendarData();
+            for (int index = 0; index < 51; index++)
+                data.Items.Add(new Todo { Title = "普通任务 " + index.ToString("D2"), Date = "2026-09-10", Important = index == 50 });
+            data.Items.Add(new Todo { Title = "逾期任务", Date = "2026-09-10",
+                Deadline = new DeadlineSpec { StartAt = "2026-09-09T08:00:00+08:00", Amount = 24, Unit = "hours", Confirmed = true } });
+            TaskQueryResult result = TaskQueryService.Query(data, now, TaskQueryRange.Today);
+            Check(result.Overdue.Count == 1 && result.Due.Count == 49, "Task query did not cap combined model-facing items at fifty");
+            Check(result.Overdue.Single().Title == "逾期任务" && result.Due.First().Title == "普通任务 50",
+                "Task query did not keep overdue status, importance, and title ordering deterministic");
+        });
         Test("mail sync state recovers its backup and never contains the authorization code", delegate {
             string directory = Path.Combine(root, "mail-state");
             var store = new MailStateStore(directory);
