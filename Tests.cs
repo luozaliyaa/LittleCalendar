@@ -203,6 +203,79 @@ internal static class CalendarTests
             object value = notices.GetValue(new CalendarData(), null);
             Check(value is System.Collections.IList, "Opportunity notification collection is not initialized");
         });
+        Test("chat history retains the newest fifty messages in chronological order", delegate {
+            var store = new ChatHistoryStore(Path.Combine(root, "chat-retention"));
+            for (int index = 1; index <= 55; index++) {
+                store.Append(new ChatMessage {
+                    Id = "message-" + index,
+                    Role = index % 2 == 0 ? "assistant" : "user",
+                    Text = "message " + index,
+                    CreatedAt = new DateTimeOffset(2026, 9, 10, 8, index, 0, TimeSpan.FromHours(8)).ToString("o", CultureInfo.InvariantCulture)
+                });
+            }
+            ChatHistory history = store.Load();
+            Check(history.Version == 1 && history.Messages.Count == 50, "Chat history did not retain exactly fifty messages");
+            for (int index = 0; index < history.Messages.Count; index++) {
+                int expected = index + 6;
+                Check(history.Messages[index].Id == "message-" + expected && history.Messages[index].Text == "message " + expected,
+                    "Chat history did not preserve chronological retention at message " + expected);
+            }
+        });
+        Test("chat history recovers the prior backup after primary JSON corruption", delegate {
+            string directory = Path.Combine(root, "chat-recovery");
+            var store = new ChatHistoryStore(directory);
+            store.Append(new ChatMessage { Id = "before", Role = "user", Text = "first retained message", CreatedAt = "2026-09-10T08:00:00+08:00" });
+            store.Append(new ChatMessage { Id = "after", Role = "assistant", Text = "second retained message", CreatedAt = "2026-09-10T08:01:00+08:00" });
+            File.WriteAllText(Path.Combine(directory, "chat-history.json"), "{broken");
+            ChatHistory recovered = store.Load();
+            Check(recovered.Messages.Count == 1 && recovered.Messages.Single().Id == "before", "Chat history did not recover the prior valid backup");
+            Check(Directory.GetFiles(directory, "chat-history.json.damaged-*").Length == 1, "Damaged chat history was not preserved");
+        });
+        Test("chat history serializes only bounded chat fields without credentials or a full raw mail body", delegate {
+            string directory = Path.Combine(root, "chat-safe-storage");
+            string rawMailBody = new string('m', 5000);
+            var store = new ChatHistoryStore(directory);
+            store.Append(new ChatMessage {
+                Id = "safe", Role = "assistant", Text = rawMailBody,
+                CreatedAt = "2026-09-10T08:00:00+08:00", Intent = "sync"
+            });
+            string json = File.ReadAllText(Path.Combine(directory, "chat-history.json"));
+            Check(!json.Contains("deepseek-secret") && !json.Contains("mail-auth-code") && !json.Contains(rawMailBody),
+                "Chat history serialized a secret or complete raw mail body");
+            Check(store.Load().Messages.Single().Text.Length == 4000, "Chat display text was not bounded to 4,000 characters");
+        });
+        Test("chat history rejects invalid roles, normalizes timestamps, and clears stored messages", delegate {
+            string directory = Path.Combine(root, "chat-validation");
+            var store = new ChatHistoryStore(directory);
+            Throws(delegate { store.Append(new ChatMessage { Id = "invalid", Role = "tool", Text = "not allowed", CreatedAt = "2026-09-10T08:00:00+08:00" }); });
+            store.Append(new ChatMessage { Id = "valid", Role = "system", Text = "allowed", CreatedAt = "2026-09-10 08:00:00 +08:00" });
+            ChatMessage message = store.Load().Messages.Single();
+            DateTimeOffset timestamp;
+            Check(DateTimeOffset.TryParse(message.CreatedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out timestamp) && message.CreatedAt == timestamp.ToString("o", CultureInfo.InvariantCulture),
+                "Chat timestamp was not normalized to an ISO 8601 offset value");
+            store.Clear();
+            Check(store.Load().Messages.Count == 0, "Chat history clear did not persist an empty history");
+        });
+        Test("chat history normalizes sync cursor timestamps with offsets", delegate {
+            var store = new ChatHistoryStore(Path.Combine(root, "chat-sync-timestamps"));
+            store.Append(new ChatMessage {
+                Id = "sync", Role = "assistant", Text = "同步完成", CreatedAt = "2026-09-10T08:00:00+08:00",
+                Sync = new ChatSyncSummary {
+                    PreviousCompletedAt = "2026-09-10 07:00:00 +08:00", StartedAt = "2026-09-10 07:55:00 +08:00", CompletedAt = "2026-09-10 08:00:00 +08:00",
+                    Folders = new List<ChatFolderCursorSummary> {
+                        new ChatFolderCursorSummary { DisplayName = "收件箱", PreviousScannedAt = "2026-09-10 07:30:00 +08:00", CompletedAt = "2026-09-10 08:00:00 +08:00" }
+                    }
+                }
+            });
+            ChatSyncSummary sync = store.Load().Messages.Single().Sync;
+            Func<string, bool> isNormalizedTimestamp = delegate(string value) {
+                DateTimeOffset timestamp;
+                return DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out timestamp) && value == timestamp.ToString("o", CultureInfo.InvariantCulture);
+            };
+            Check(isNormalizedTimestamp(sync.PreviousCompletedAt) && isNormalizedTimestamp(sync.StartedAt) && isNormalizedTimestamp(sync.CompletedAt) &&
+                isNormalizedTimestamp(sync.Folders.Single().PreviousScannedAt) && isNormalizedTimestamp(sync.Folders.Single().CompletedAt),
+                "Chat sync timestamps were not normalized to ISO 8601 offset values");
+        });
         Test("mail sync state recovers its backup and never contains the authorization code", delegate {
             string directory = Path.Combine(root, "mail-state");
             var store = new MailStateStore(directory);
