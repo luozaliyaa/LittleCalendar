@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -195,6 +196,17 @@ internal static class CalendarTests
     {
         root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "test-results", DateTime.Now.ToString("yyyyMMdd-HHmmss")));
         Directory.CreateDirectory(root);
+        Test("project documentation explains chat retention incremental cursors and mail safety boundaries", delegate {
+            string repository = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
+            string readme = File.ReadAllText(Path.Combine(repository, "README.md"), Encoding.UTF8);
+            string agents = File.ReadAllText(Path.Combine(repository, "AGENTS.md"), Encoding.UTF8);
+            string contributing = File.ReadAllText(Path.Combine(repository, "CONTRIBUTING.md"), Encoding.UTF8);
+            Check(readme.Contains("对话助手") && readme.Contains("读取新邮件") && readme.Contains("未来七天"), "README does not explain the chat entry and shortcuts");
+            Check(readme.Contains("UID") && readme.Contains("ISO 8601") && readme.Contains("50 条"), "README does not explain strict incremental cursors, timestamps, or local retention");
+            Check(readme.Contains("不会发送、移动或删除邮件") && readme.Contains("清空对话"), "README omits chat clearing or mail mutation boundaries");
+            Check(agents.Contains("ChatAssistant.cs") && agents.Contains("ChatStore.cs") && agents.Contains("严格增量"), "Agent guidance omits chat module responsibilities or cursor contract");
+            Check(contributing.Contains("对话记录") && contributing.Contains("增量同步"), "Contributor guidance omits chat privacy or incremental-sync review");
+        });
         Test("chat task facts survive absent key and model failure", delegate {
             string directory = Path.Combine(root, "chat-service-fallback");
             var controller = new CalendarController(new CalendarStore(directory));
