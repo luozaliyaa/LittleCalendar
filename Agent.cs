@@ -17,11 +17,13 @@ namespace LittleCalendar
         public string Model { get; set; }
         public string LastAutomaticDate { get; set; }
         public string LastSummaryAt { get; set; }
+        public string LastSummaryAttemptAt { get; set; }
+        public string LastSummaryError { get; set; }
         public AgentSummary LastSummary { get; set; }
         public AgentSettings()
         {
             Enabled = false; DailyTime = "09:00"; Model = "deepseek-v4-flash";
-            LastAutomaticDate = ""; LastSummaryAt = "";
+            LastAutomaticDate = ""; LastSummaryAt = ""; LastSummaryAttemptAt = ""; LastSummaryError = "";
         }
     }
 
@@ -42,7 +44,15 @@ namespace LittleCalendar
         public static bool IsDue(AgentSettings settings, DateTime now)
         {
             if (settings == null || !settings.Enabled || !Dates.IsTime(settings.DailyTime)) return false;
-            if (settings.LastAutomaticDate == Dates.Key(now.Date)) return false;
+            if (settings.LastAutomaticDate == Dates.Key(now.Date)) {
+                DateTimeOffset summarizedAt;
+                if (DateTimeOffset.TryParse(settings.LastSummaryAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out summarizedAt) &&
+                    summarizedAt.LocalDateTime.Date == now.Date) return false;
+            }
+            DateTimeOffset attemptedAt;
+            if (!String.IsNullOrWhiteSpace(settings.LastSummaryError) &&
+                DateTimeOffset.TryParse(settings.LastSummaryAttemptAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out attemptedAt) &&
+                new DateTimeOffset(now) < attemptedAt.AddMinutes(30)) return false;
             return now.TimeOfDay >= Dates.Time(settings.DailyTime);
         }
     }
@@ -404,17 +414,41 @@ namespace LittleCalendar
             controller.Commit(data => {
                 data.Agent.LastSummary = summary;
                 data.Agent.LastSummaryAt = job.Now.ToString("o", CultureInfo.InvariantCulture);
+                data.Agent.LastSummaryAttemptAt = data.Agent.LastSummaryAt;
+                data.Agent.LastSummaryError = "";
                 if (job.Automatic) data.Agent.LastAutomaticDate = Dates.Key(job.Now.Date);
             });
         }
-        public void Fail(AgentJob job)
+        public void Fail(AgentJob job, Exception error)
         {
-            if (job != null && job.Automatic) controller.Commit(data => data.Agent.LastAutomaticDate = Dates.Key(job.Now.Date));
+            if (job == null) return;
+            controller.Commit(data => {
+                data.Agent.LastSummaryAttemptAt = job.Now.ToString("o", CultureInfo.InvariantCulture);
+                data.Agent.LastSummaryError = AgentErrors.Safe(error);
+            });
+        }
+    }
+
+    public static class AgentErrors
+    {
+        public static string Safe(Exception error)
+        {
+            string message = error == null ? "" : error.Message ?? "";
+            if (message.Contains("长度限制")) return "DeepSeek 输出达到长度限制，未生成最终总结，请重试。";
+            if (message.Contains("没有返回可用内容")) return "DeepSeek 没有返回可用内容，请重试。";
+            if (message.Contains("不是有效 JSON")) return "DeepSeek 返回的总结格式无效，请重试。";
+            if (message.Contains("字段不完整")) return "DeepSeek 返回的总结字段不完整，请重试。";
+            if (message.Contains("请求失败")) return "DeepSeek 请求失败，请检查网络、API Key 和模型名后重试。";
+            return "智能整理失败，请稍后重试。";
         }
     }
 
     public static class DeepSeekRequestPayload
     {
+        public static string Build(string model, string system, string user, int maxTokens)
+        {
+            return Build(model, system, user, maxTokens, true);
+        }
         public static string Build(string model, string system, string user, int maxTokens, bool disableThinking)
         {
             return new JavaScriptSerializer { MaxJsonLength = 2 * 1024 * 1024 }.Serialize(new {
@@ -424,6 +458,27 @@ namespace LittleCalendar
                 messages = new[] { new { role = "system", content = system }, new { role = "user", content = user } }
             });
         }
+    }
+
+    public static class DeepSeekCompletions
+    {
+        private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 2 * 1024 * 1024 };
+        public static string ExtractContent(string responseJson)
+        {
+            CompletionEnvelope envelope;
+            try { envelope = Json.Deserialize<CompletionEnvelope>(responseJson); }
+            catch (Exception error) { throw new InvalidDataException("DeepSeek 返回了无法解析的响应。", error); }
+            Choice choice = envelope == null || envelope.choices == null ? null : envelope.choices.FirstOrDefault();
+            if (choice == null || choice.message == null) throw new InvalidDataException("DeepSeek 返回的响应缺少结果。");
+            if (choice.finish_reason == "length") throw new InvalidDataException("DeepSeek 输出达到长度限制，未生成最终总结。");
+            if (choice.finish_reason == "content_filter") throw new InvalidDataException("DeepSeek 未返回内容，因为响应触发了内容过滤。");
+            if (choice.finish_reason == "insufficient_system_resource") throw new InvalidDataException("DeepSeek 暂时资源不足，未生成最终总结。");
+            if (!String.IsNullOrWhiteSpace(choice.message.content)) return choice.message.content;
+            throw new InvalidDataException("DeepSeek 没有返回可用内容。");
+        }
+        private sealed class CompletionEnvelope { public List<Choice> choices { get; set; } }
+        private sealed class Choice { public string finish_reason { get; set; } public Message message { get; set; } }
+        private sealed class Message { public string content { get; set; } public string reasoning_content { get; set; } }
     }
 
     public interface IStructuredMailAgent
@@ -499,7 +554,6 @@ namespace LittleCalendar
     {
         private const string Endpoint = "https://api.deepseek.com/chat/completions";
         private const string ResponsesEndpoint = "https://api.deepseek.com/responses";
-        private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = 2 * 1024 * 1024 };
         public ChatLanguageReply Reply(ChatLanguageRequest request, string apiKey, string model)
         {
             string content = CompleteStructured(apiKey, ChatLanguagePrompts.BuildPayload(request, model));
@@ -516,7 +570,7 @@ namespace LittleCalendar
         }
         public string CompleteJson(string apiKey, string model, string system, string user, int maxTokens)
         {
-            return CompleteJson(apiKey, model, system, user, maxTokens, false);
+            return CompleteJson(apiKey, model, system, user, maxTokens, true);
         }
         public string CompleteJson(string apiKey, string model, string system, string user, int maxTokens, bool disableThinking)
         {
@@ -532,10 +586,7 @@ namespace LittleCalendar
                 using (Stream stream = request.GetRequestStream()) stream.Write(bytes, 0, bytes.Length);
                 using (var response = (HttpWebResponse)request.GetResponse())
                 using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8)) {
-                    var envelope = json.Deserialize<CompletionEnvelope>(reader.ReadToEnd());
-                    if (envelope == null || envelope.choices == null || envelope.choices.Count == 0 || envelope.choices[0].message == null || String.IsNullOrWhiteSpace(envelope.choices[0].message.content))
-                        throw new InvalidDataException("DeepSeek 没有返回可用内容。");
-                    return envelope.choices[0].message.content;
+                    return DeepSeekCompletions.ExtractContent(reader.ReadToEnd());
                 }
             } catch (WebException error) {
                 string detail = "";
@@ -570,8 +621,5 @@ namespace LittleCalendar
             }
         }
         private static string LimitError(string value) { value = value.Replace("\r", " ").Replace("\n", " "); return value.Length <= 300 ? value : value.Substring(0, 300); }
-        private sealed class CompletionEnvelope { public List<Choice> choices { get; set; } }
-        private sealed class Choice { public Message message { get; set; } }
-        private sealed class Message { public string content { get; set; } }
     }
 }

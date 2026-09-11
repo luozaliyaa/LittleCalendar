@@ -61,7 +61,15 @@ namespace LittleCalendar
             Save(history);
         }
 
-        public void Clear() { Save(new ChatHistory()); }
+        public void Clear()
+        {
+            Save(new ChatHistory());
+            string backup = FilePath + ".bak";
+            if (File.Exists(backup)) File.Delete(backup);
+            string directory = Path.GetDirectoryName(FilePath);
+            string pattern = Path.GetFileName(FilePath) + ".damaged-*";
+            foreach (string damaged in Directory.GetFiles(directory, pattern)) File.Delete(damaged);
+        }
 
         private ChatHistory Decode(string json)
         {

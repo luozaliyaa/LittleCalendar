@@ -38,7 +38,8 @@ namespace LittleCalendar
     public sealed class SettingsWindow : Window
     {
         public SettingsWindow(CalendarController controller, Action testReminder, SecretStore secrets, IWorkAgent agent,
-            MailStateStore mailStateStore = null, MailSecretStore mailSecrets = null, IMailboxClientFactory mailFactory = null, Action<int> syncMail = null)
+            MailStateStore mailStateStore = null, MailSecretStore mailSecrets = null, IMailboxClientFactory mailFactory = null, Action<int> syncMail = null,
+            Func<bool> acquireMailbox = null, Action releaseMailbox = null)
         {
             string dataDirectory = Path.GetDirectoryName(controller.Store.FilePath);
             mailStateStore = mailStateStore ?? new MailStateStore(dataDirectory);
@@ -150,29 +151,40 @@ namespace LittleCalendar
                 try { authorization = candidateAuthorization(); options = connectionOptions(); }
                 catch (Exception e) { message.Text = e.Message; return; }
                 if (String.IsNullOrWhiteSpace(authorization)) { message.Text = "请先填写网易邮箱授权码。"; return; }
+                if (acquireMailbox != null && !acquireMailbox()) { message.Text = "邮箱正在处理，请稍后再试。"; return; }
                 testMail.IsEnabled = false; message.Text = "正在连接网易邮箱…";
                 ThreadPool.QueueUserWorkItem(delegate {
                     IList<MailboxFolder> folders = null; Exception error = null;
                     try { using (IMailboxClient mailbox = mailFactory.Create()) { mailbox.Connect(options, authorization); folders = mailbox.ListFolders(); } }
                     catch (Exception e) { error = e; }
                     Dispatcher.BeginInvoke(new Action(delegate {
-                        testMail.IsEnabled = true;
-                        if (error == null) { renderFolders(folders); message.Text = "连接成功，发现 " + folders.Count(MailFolderPolicy.ShouldInclude) + " 个可同步文件夹。"; }
-                        else message.Text = "邮箱连接失败：" + error.Message;
+                        try {
+                            testMail.IsEnabled = true;
+                            if (error == null) { renderFolders(folders); message.Text = "连接成功，发现 " + folders.Count(MailFolderPolicy.ShouldInclude) + " 个可同步文件夹。"; }
+                            else message.Text = "邮箱连接失败：" + error.Message;
+                        } finally { if (releaseMailbox != null) releaseMailbox(); }
                     }));
                 });
             }); mailActions.Children.Add(testMail);
             mailActions.Children.Add(UI.Button("立即同步邮件", delegate {
                 if (syncMail == null) { message.Text = "保存设置后，可从主程序立即同步。"; return; }
+                bool ownsMailbox = false;
                 try {
                     MailConnectionOptions options = connectionOptions();
                     string authorization = candidateAuthorization();
                     if (String.IsNullOrWhiteSpace(authorization)) throw new ArgumentException("请先填写网易邮箱授权码。");
+                    if (acquireMailbox != null) {
+                        if (!acquireMailbox()) { message.Text = "邮箱正在处理，请稍后再试。"; return; }
+                        ownsMailbox = true;
+                    }
                     if (!String.IsNullOrWhiteSpace(mailAuthorization.Password)) mailSecrets.Save(mailAuthorization.Password);
                     mailState.Account.Enabled = true; mailState.Account.Address = options.Address; mailState.Account.Host = options.Host; mailState.Account.Port = options.Port; mailState.Account.UseSsl = true;
                     mailState.Account.ManualSyncDays = selectedSyncDays();
-                    mailStateStore.Save(mailState); syncMail(mailState.Account.ManualSyncDays); message.Text = "已开始同步最近 " + mailState.Account.ManualSyncDays + " 天邮件，可回到日历查看进度。";
+                    mailStateStore.Save(mailState);
+                    if (ownsMailbox && releaseMailbox != null) { releaseMailbox(); ownsMailbox = false; }
+                    syncMail(mailState.Account.ManualSyncDays); message.Text = "已开始同步最近 " + mailState.Account.ManualSyncDays + " 天邮件，可回到日历查看进度。";
                 } catch (Exception e) { message.Text = e.Message; }
+                finally { if (ownsMailbox && releaseMailbox != null) releaseMailbox(); }
             }));
             mailActions.Children.Add(UI.Button("清除邮箱授权", delegate {
                 try { mailSecrets.Clear(); mailAuthorization.Password = ""; mailHint.Text = "授权码已清除。"; message.Text = "已清除本机保存的网易邮箱授权码。"; }
@@ -264,6 +276,11 @@ namespace LittleCalendar
         private readonly IMailboxClientFactory mailFactory;
         private bool agentBusy;
         private bool mailBusy;
+        private readonly ChatHistoryStore chatHistoryStore;
+        private readonly ChatAssistantService chatAssistant;
+        private ChatHistory chatHistory = new ChatHistory();
+        private ChatWindow chatWindow;
+        private bool chatBusy;
         public CalendarRuntime(CalendarController controller, Func<DateTime> clock = null, IWorkAgent workAgent = null, IMailSyncService mailSync = null)
         {
             Controller = controller; this.clock = clock ?? (() => DateTime.Now);
@@ -273,7 +290,11 @@ namespace LittleCalendar
             var mailDiagnostics = new MailDiagnosticLog(dataDirectory);
             this.mailSync = mailSync ?? new MailSyncCoordinator(controller, mailStateStore, mailSecrets, secrets,
                 mailFactory, new DeepSeekMailActionAnalyzer(this.workAgent as DeepSeekAgent ?? new DeepSeekAgent(), mailDiagnostics), this.clock, mailDiagnostics);
+            chatHistoryStore = new ChatHistoryStore(dataDirectory);
+            chatAssistant = new ChatAssistantService(controller, secrets, this.workAgent as IChatLanguageAgent ?? new DeepSeekAgent(),
+                this.mailSync as MailSyncCoordinator, mailStateStore, chatHistoryStore);
             Window = new CalendarWindow(controller, this.clock); Window.SettingsRequested = OpenSettings; Window.AgentSummaryRequested = delegate { StartAgentSummary(false); };
+            Window.ChatRequested = OpenChat;
             lastDay = this.clock().Date;
             icon = CreateIcon(); tray.Icon = icon; tray.Text = "小日历 · 双击查看待办"; tray.Visible = true;
             Window.Icon = Imaging.CreateBitmapSourceFromHIcon(icon.Handle, Int32Rect.Empty, System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
@@ -300,9 +321,82 @@ namespace LittleCalendar
         }
         public void OpenSettings()
         {
-            ShowMain(); var settings = new SettingsWindow(Controller, PreviewReminder, secrets, workAgent, mailStateStore, mailSecrets, mailFactory, delegate(int days) { StartMailSync(false, days); }) { Owner = Window };
+            ShowMain(); var settings = new SettingsWindow(Controller, PreviewReminder, secrets, workAgent, mailStateStore, mailSecrets, mailFactory,
+                delegate(int days) { StartMailSync(false, days); }, TryBeginMailbox, EndMailbox) { Owner = Window };
             settings.ShowDialog(); Tick();
         }
+        public void OpenChat()
+        {
+            if (!Window.Dispatcher.CheckAccess()) { Window.Dispatcher.BeginInvoke(new Action(OpenChat)); return; }
+            if (exiting) return;
+            ShowMain();
+            if (chatWindow == null) {
+                var opened = new ChatWindow(chatHistory, SendChatMessage, ClearChatHistory, NavigateChatTodo) { Owner = Window };
+                chatWindow = opened;
+                opened.Closed += delegate { if (chatWindow == opened) chatWindow = null; };
+                if (chatBusy) opened.SetBusy(true, "正在处理消息…");
+                else RunChatOperation(null, "", false, false, "正在读取对话记录…");
+            }
+            chatWindow.Show();
+            if (chatWindow.WindowState == WindowState.Minimized) chatWindow.WindowState = WindowState.Normal;
+            chatWindow.Activate();
+        }
+        public void SendChatMessage(string text)
+        {
+            if (!Window.Dispatcher.CheckAccess()) { Window.Dispatcher.BeginInvoke(new Action(() => SendChatMessage(text))); return; }
+            if (chatBusy) return;
+            if (exiting || sessionLocked || String.IsNullOrWhiteSpace(text)) {
+                if (chatWindow != null) chatWindow.CompleteSend(null, "暂时无法发送，请稍后再试。", false);
+                return;
+            }
+            bool sync = ChatIntentRouter.Parse(text).Kind == ChatIntentKind.SyncMailIncremental;
+            if (sync && !TryBeginMailbox()) {
+                if (chatWindow != null) chatWindow.CompleteSend(null, "邮箱正在处理，请稍后再试。", false);
+                return;
+            }
+            DateTime now = clock();
+            RunChatOperation(delegate { chatAssistant.Handle(text, now); }, "已完成", true, sync,
+                sync ? "正在读取上次同步后的新邮件…" : "正在查询待办…");
+        }
+        private void ClearChatHistory()
+        {
+            if (chatBusy || exiting) return;
+            RunChatOperation(chatHistoryStore.Clear, "对话已清空", false, false, "正在清空对话…");
+        }
+        private void RunChatOperation(Action operation, string completedText, bool clearInput, bool releaseMailbox, string progress)
+        {
+            chatBusy = true;
+            if (chatWindow != null) chatWindow.SetBusy(true, progress);
+            ThreadPool.QueueUserWorkItem(delegate {
+                ChatHistory loaded = null; bool succeeded = false; string warning = "";
+                try {
+                    if (operation != null) operation();
+                    loaded = chatHistoryStore.Load(); warning = chatHistoryStore.LoadWarning; succeeded = true;
+                } catch { /* Keep raw exceptions, secrets and model output out of the conversation. */ }
+                Window.Dispatcher.BeginInvoke(new Action(delegate {
+                    try {
+                        if (loaded != null) chatHistory = loaded;
+                        if (exiting) return;
+                        if (chatWindow != null) chatWindow.CompleteSend(loaded,
+                            succeeded ? (String.IsNullOrEmpty(warning) ? completedText : warning) : "操作未完成，请检查本机对话记录或稍后重试。", succeeded && clearInput);
+                        Window.Refresh();
+                    } finally { chatBusy = false; if (releaseMailbox) EndMailbox(); }
+                }));
+            });
+        }
+        private void NavigateChatTodo(string id)
+        {
+            Todo todo = Controller.Data.Items.FirstOrDefault(item => item.Id == id && !item.Deleted);
+            if (todo == null) return;
+            ShowMain(); Window.SelectDate(Dates.Parse(todo.Date));
+        }
+        private bool TryBeginMailbox()
+        {
+            // All callers acquire/release on the calendar dispatcher, including settings connection tests.
+            if (exiting || sessionLocked || mailBusy) return false;
+            mailBusy = true; return true;
+        }
+        private void EndMailbox() { mailBusy = false; }
         public void StartAgentSummary(bool automatic)
         {
             if (exiting || sessionLocked || agentBusy) return;
@@ -318,7 +412,10 @@ namespace LittleCalendar
                 Window.Dispatcher.BeginInvoke(new Action(delegate {
                     try {
                         if (error == null) { agentCoordinator.Complete(job, summary); Window.SetAgentBusy(false, "总结已更新"); }
-                        else { agentCoordinator.Fail(job); Window.SetAgentBusy(false, "整理失败：" + error.Message); }
+                        else {
+                            agentCoordinator.Fail(job, error);
+                            Window.SetAgentBusy(false, "整理失败：" + AgentErrors.Safe(error) + (job.Data.Agent.LastSummary == null ? "" : "；仍显示旧总结"));
+                        }
                     } catch (Exception e) { Window.SetAgentBusy(false, "保存总结失败：" + e.Message); }
                     finally { agentBusy = false; }
                 }));
@@ -326,9 +423,11 @@ namespace LittleCalendar
         }
         public void StartMailSync(bool automatic, int days = 0)
         {
+            if (!Window.Dispatcher.CheckAccess()) { Window.Dispatcher.BeginInvoke(new Action(() => StartMailSync(automatic, days))); return; }
             if (exiting || sessionLocked || mailBusy) return;
             if (automatic && !mailSync.IsDue(clock())) return;
-            mailBusy = true; Window.SetAgentBusy(true, automatic ? "正在同步招聘邮件…" : "正在读取邮箱…");
+            if (!TryBeginMailbox()) return;
+            Window.SetAgentBusy(true, automatic ? "正在同步招聘邮件…" : "正在读取邮箱…");
             ThreadPool.QueueUserWorkItem(delegate {
                 MailSyncResult result = null; Exception error = null;
                 try { result = mailSync.Run(automatic, days); }
@@ -339,7 +438,7 @@ namespace LittleCalendar
                         else if (error == null) Window.SetAgentBusy(false, "邮箱同步部分完成：新增 " + result.CreatedCount + " 项，" + result.Errors.Count + " 处失败；详情见邮箱日志");
                         else Window.SetAgentBusy(false, "邮箱同步失败：" + error.Message);
                     } finally {
-                        mailBusy = false;
+                        EndMailbox();
                         StartAgentSummary(automatic);
                     }
                 }));
@@ -394,6 +493,7 @@ namespace LittleCalendar
         {
             exiting = true;
             timer.Stop(); SystemEvents.PowerModeChanged -= OnPowerChanged; SystemEvents.SessionSwitch -= OnSessionSwitch;
+            if (chatWindow != null) chatWindow.Close();
             if (ActiveReminder != null) ActiveReminder.Close(); Window.Close(); tray.Visible = false; tray.Dispose(); icon.Dispose();
         }
         [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
