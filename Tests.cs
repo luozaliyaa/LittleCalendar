@@ -67,12 +67,15 @@ internal static class CalendarTests
         public string FailFolder;
         public int KeepAliveCalls;
         public bool Connected;
+        public uint? OpenedUidValidity;
         public FakeMailboxClient() { Capabilities = new MailboxCapabilities(); }
         public void Connect(MailConnectionOptions options, string authorizationCode) { Connected = options.Address.EndsWith("@163.com") && authorizationCode == "mail-secret"; }
         public IList<MailboxFolder> ListFolders() { return Folders.ToList(); }
+        public uint OpenReadOnly(MailboxFolder folder) { return OpenedUidValidity ?? folder.UidValidity; }
         public IList<MailMessageSnapshot> Fetch(MailboxFolder folder, MailFetchRequest request)
         {
-            Requests.Add(new MailFetchRequest { Since = request.Since, MinimumUid = request.MinimumUid });
+            MailSearchPolicy.CreateQuery(request, OpenedUidValidity ?? folder.UidValidity);
+            Requests.Add(new MailFetchRequest { Since = request.Since, MinimumUid = request.MinimumUid, UidValidity = request.UidValidity });
             if (folder.FullName == FailFolder) throw new IOException("folder unavailable");
             List<MailMessageSnapshot> values;
             return Messages.TryGetValue(folder.FullName, out values) ? values.ToList() : new List<MailMessageSnapshot>();
@@ -652,6 +655,26 @@ internal static class CalendarTests
             MailFolderState saved = fixture.StateStore.Load().Folders.Single();
             Check(saved.LastUid == 44 && saved.LastScannedAt == folder.CompletedAt, "Successful cursor was not persisted");
         });
+        Test("folder summaries project sensitive and custom labels to a neutral safe name", delegate {
+            string[] labels = { "fictional-sync@163.com", "mail-secret", "deep-secret", "<fictional-id@example.invalid>", "private subject and sender", "收件箱\r\nmail-secret", "My custom hiring folder" };
+            for (int index = 0; index < labels.Length; index++) {
+                var fixture = new IncrementalMailFixture("chat-safe-label-" + index);
+                fixture.Factory.Client.Folders.Single().DisplayName = labels[index];
+                MailFolderSyncSummary summary = fixture.Sync.RunIncremental().Folders.Single();
+                Check(summary.DisplayName == "邮箱文件夹", "Server-controlled label escaped the safe projection");
+                string serialized = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(summary);
+                Check(!serialized.Contains(labels[index]), "Folder summary serialized a sensitive label");
+            }
+        });
+        Test("folder summaries preserve only allowlisted generic names", delegate {
+            string[] labels = { "INBOX", "收件箱", "junk", "垃圾邮件", "广告邮件", "订阅邮件" };
+            string[] expected = { "收件箱", "收件箱", "垃圾邮件", "垃圾邮件", "广告邮件", "订阅邮件" };
+            for (int index = 0; index < labels.Length; index++) {
+                var fixture = new IncrementalMailFixture("chat-known-label-" + index);
+                fixture.Factory.Client.Folders.Single().DisplayName = labels[index];
+                Check(fixture.Sync.RunIncremental().Folders.Single().DisplayName == expected[index], "Generic folder label was not normalized");
+            }
+        });
         Test("incremental first sync uses saved window or seven day default without changing automatic schedule", delegate {
             foreach (int days in new[] { 7, 14 }) {
                 var fixture = new IncrementalMailFixture("chat-initial-" + days);
@@ -685,12 +708,68 @@ internal static class CalendarTests
             Check(fixture.Factory.Client.Requests.Last().MinimumUid == 43 && fixture.StateStore.Load().Folders.Single().LastUid == 45, "Failed message could not be retried");
             Check(fixture.Analyzer.Calls == 4 && retried.Errors.Count == 0, "Incremental retry reanalyzed successful messages or skipped the failure");
         });
-        Test("failed recovery never restores an obsolete UID and retries the recovery window", delegate {
+        Test("failed recovery preserves the committed generation and retries the recovery window", delegate {
             var fixture = new IncrementalMailFixture("chat-reset-failure", 42, 6); fixture.Messages(2, 3); fixture.Analyzer.FailSubject = "虚构消息 2";
             MailFolderSyncSummary failedFolder = fixture.Sync.RunIncremental().Folders.Single();
-            Check(failedFolder.PreviousUid == 42 && failedFolder.FinalUid == 0 && fixture.StateStore.Load().Folders.Single().UidValidity == 7, "Failed recovery kept an obsolete UID");
+            Check(failedFolder.PreviousUid == 42 && failedFolder.FinalUid == 42 && fixture.StateStore.Load().Folders.Single().UidValidity == 6, "Failed recovery replaced the committed generation");
             fixture.Analyzer.FailSubject = null; fixture.Sync.RunIncremental();
             Check(fixture.Factory.Client.Requests.Last().MinimumUid == 0 && fixture.StateStore.Load().Folders.Single().LastUid == 3, "Failed recovery was not retryable");
+        });
+        Test("opened folder generation overrides discovery before constructing an incremental query", delegate {
+            foreach (uint discovered in new uint[] { 7, 0 }) {
+                var fixture = new IncrementalMailFixture("chat-open-generation-" + discovered); fixture.Messages(1, 2);
+                fixture.Factory.Client.Folders.Single().UidValidity = discovered;
+                fixture.Factory.Client.OpenedUidValidity = 8;
+                foreach (MailMessageSnapshot message in fixture.Factory.Client.Messages["INBOX"]) message.UidValidity = 8;
+                fixture.Analyzer.BeforeAnalyze = () => {
+                    MailFolderState pending = fixture.StateStore.Load().Folders.Single();
+                    Check(pending.UidValidity == 7 && pending.LastUid == 42, "Recovery generation was committed before processing finished");
+                };
+                MailSyncResult result = fixture.Sync.RunIncremental();
+                MailFetchRequest request = fixture.Factory.Client.Requests.Single();
+                Check(request.MinimumUid == 0 && request.Since == fixture.Now.AddDays(-7), "Old UID cursor was applied to a newly opened generation");
+                Check(result.ScannedCount == 2 && result.Errors.Count == 0 && fixture.StateStore.Load().Folders.Single().UidValidity == 8 && fixture.StateStore.Load().Folders.Single().LastUid == 2, "New generation messages were silently missed");
+                MailFolderSyncSummary summary = result.Folders.Single();
+                Check(summary.PreviousUidValidity == 7 && summary.AttemptedUidValidity == 8 && summary.FinalUidValidity == 8, "Recovery summary lost its generation diagnostics");
+            }
+        });
+        Test("unavailable opened UIDVALIDITY fails retryably without issuing an old cursor query", delegate {
+            foreach (uint discovered in new uint[] { 7, 0 }) {
+                var fixture = new IncrementalMailFixture("chat-open-unavailable-" + discovered);
+                fixture.Factory.Client.Folders.Single().UidValidity = discovered; fixture.Factory.Client.OpenedUidValidity = 0;
+                MailSyncResult result = fixture.Sync.RunIncremental();
+                MailFolderState saved = fixture.StateStore.Load().Folders.Single();
+                Check(fixture.Factory.Client.Requests.Count == 0 && result.Errors.Count == 1 && !String.IsNullOrEmpty(result.Folders.Single().Error), "Unavailable UIDVALIDITY issued a query or claimed success");
+                Check(saved.LastUid == 42 && saved.UidValidity == 7 && saved.LastScannedAt == "2026-09-10T08:00:00+08:00" && String.IsNullOrEmpty(result.Folders.Single().CompletedAt), "Unavailable generation changed the committed cursor");
+                fixture.Factory.Client.OpenedUidValidity = 7; fixture.Sync.RunIncremental();
+                Check(fixture.Factory.Client.Requests.Single().MinimumUid == 43, "Unverified generation failure was not retryable");
+            }
+        });
+        Test("failed opened-generation recovery keeps the old cursor until a successful saved-window retry", delegate {
+            var fixture = new IncrementalMailFixture("chat-open-recovery-failure"); fixture.Messages(1, 2); fixture.Factory.Client.OpenedUidValidity = 8;
+            foreach (MailMessageSnapshot message in fixture.Factory.Client.Messages["INBOX"]) message.UidValidity = 8;
+            MailSyncState initial = fixture.StateStore.Load(); initial.Account.ManualSyncDays = 14; fixture.StateStore.Save(initial);
+            fixture.Analyzer.FailSubject = "虚构消息 1";
+            MailSyncResult first = fixture.Sync.RunIncremental();
+            MailFolderState failedCursor = fixture.StateStore.Load().Folders.Single();
+            Check(first.Errors.Count == 1 && failedCursor.UidValidity == 7 && failedCursor.LastUid == 42 && first.Folders.Single().FinalUid == 42, "Failed recovery published an uncommitted generation or skipped its messages");
+            Check(first.Folders.Single().PreviousUidValidity == 7 && first.Folders.Single().AttemptedUidValidity == 8 && first.Folders.Single().FinalUidValidity == 7, "Failed recovery summary claimed a committed replacement generation");
+            fixture.Analyzer.FailSubject = null; fixture.Sync.RunIncremental();
+            Check(fixture.Factory.Client.Requests.All(request => request.MinimumUid == 0 && request.Since == fixture.Now.AddDays(-14)), "Recovery retry did not reuse the saved window");
+            Check(fixture.StateStore.Load().Folders.Single().UidValidity == 8 && fixture.StateStore.Load().Folders.Single().LastUid == 2 && fixture.Analyzer.Calls == 3, "Recovery did not commit atomically after retry");
+        });
+        Test("exhausted UID cursor still validates the opened generation", delegate {
+            var fixture = new IncrementalMailFixture("chat-open-exhausted", UInt32.MaxValue); fixture.Messages(1, 2); fixture.Factory.Client.OpenedUidValidity = 8;
+            foreach (MailMessageSnapshot message in fixture.Factory.Client.Messages["INBOX"]) message.UidValidity = 8;
+            Check(fixture.Sync.RunIncremental().ScannedCount == 2 && fixture.Factory.Client.Requests.Single().MinimumUid == 0, "Exhaustion bypassed actual generation validation");
+        });
+        Test("client query policy rejects a stale or unavailable opened generation before search", delegate {
+            var request = new MailFetchRequest { UidValidity = 7, MinimumUid = 43, Since = new DateTime(2026, 9, 3) };
+            Throws(() => MailSearchPolicy.CreateQuery(request, 8));
+            Throws(() => MailSearchPolicy.CreateQuery(request, 0));
+            Check(MailSearchPolicy.CreateQuery(request, 7).Term == MailKit.Search.SearchTerm.Uid, "Validated generation lost its incremental query");
+            request.UidValidity = 0;
+            Throws(() => MailSearchPolicy.CreateQuery(request, 7));
         });
         Test("folder fetch failure reports safe cursor diagnostics and preserves the last successful scan", delegate {
             var fixture = new IncrementalMailFixture("chat-fetch-failure"); fixture.Factory.Client.FailFolder = "INBOX";

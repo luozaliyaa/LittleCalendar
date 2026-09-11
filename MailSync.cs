@@ -100,33 +100,39 @@ namespace LittleCalendar
                         MailFolderState cursor = state.Folders.First(x => x.FolderId == folder.FullName);
                         if (!cursor.Enabled) continue;
                         var summary = new MailFolderSyncSummary {
-                            DisplayName = SafeLog(folder.DisplayName ?? folder.FullName), PreviousUid = cursor.LastUid,
+                            DisplayName = SummaryFolderName(folder.DisplayName), PreviousUid = cursor.LastUid,
+                            PreviousUidValidity = cursor.UidValidity, FinalUidValidity = cursor.UidValidity,
                             FinalUid = cursor.LastUid, PreviousScannedAt = cursor.LastScannedAt
                         };
                         result.Folders.Add(summary);
                         try {
-                            if (cursor.UidValidity != 0 && folder.UidValidity != 0 && cursor.UidValidity != folder.UidValidity) cursor.LastUid = 0;
-                            if (folder.UidValidity != 0) cursor.UidValidity = folder.UidValidity;
+                            uint openedValidity = mailbox.OpenReadOnly(folder);
+                            summary.AttemptedUidValidity = openedValidity;
+                            if (openedValidity == 0) throw new InvalidOperationException("无法确认邮箱文件夹版本，请重试同步。");
+                            // Discovery is advisory. Only the opened generation can validate a saved UID.
+                            uint baselineUid = cursor.UidValidity == openedValidity ? cursor.LastUid : 0;
                             var request = new MailFetchRequest {
-                                Since = now.AddDays(-(automatic && cursor.LastUid > 0 ? 2 : windowDays)),
-                                MinimumUid = !incremental || cursor.LastUid == 0 || cursor.LastUid == UInt32.MaxValue ? 0 : cursor.LastUid + 1
+                                UidValidity = openedValidity,
+                                Since = now.AddDays(-(automatic && baselineUid > 0 ? 2 : windowDays)),
+                                MinimumUid = !incremental || baselineUid == 0 || baselineUid == UInt32.MaxValue ? 0 : baselineUid + 1
                             };
                             summary.RequestedMinimumUid = request.MinimumUid;
                             // There is no next UID in this generation once the uint range is exhausted.
-                            IList<MailMessageSnapshot> messages = incremental && cursor.LastUid == UInt32.MaxValue
+                            IList<MailMessageSnapshot> messages = incremental && baselineUid == UInt32.MaxValue
                                 ? new List<MailMessageSnapshot>() : mailbox.Fetch(folder, request).OrderBy(x => x.Uid).ToList();
                             summary.FetchedCount = messages.Count;
                             Log("FOLDER_FETCHED", "folder=" + SafeLog(folder.FullName) + " count=" + messages.Count);
                             bool folderFailed = false;
-                            uint highest = cursor.LastUid;
+                            uint highest = baselineUid;
                             foreach (MailMessageSnapshot message in messages) {
                                 // IMAP's n:* range can return an older UID when n exceeds the mailbox maximum.
-                                if (incremental && message.Uid <= cursor.LastUid) continue;
+                                if (incremental && message.Uid <= baselineUid) continue;
                                 result.ScannedCount++;
                                 if (!ProcessMessage(mailbox, message, state, result, now, apiKey, controller.Data.Agent.Model, incremental)) folderFailed = true;
                                 if (!folderFailed && message.Uid > highest) highest = message.Uid;
                             }
                             if (!folderFailed) {
+                                cursor.UidValidity = openedValidity;
                                 cursor.LastUid = highest;
                                 cursor.LastScannedAt = new DateTimeOffset(clock()).ToString("o");
                                 summary.CompletedAt = cursor.LastScannedAt;
@@ -140,6 +146,7 @@ namespace LittleCalendar
                             Log("FOLDER_FAILED", "folder=" + SafeLog(folder.FullName) + " error=" + safe);
                         }
                         summary.FinalUid = cursor.LastUid;
+                        summary.FinalUidValidity = cursor.UidValidity;
                     }
                     state.AllowsCustomKeywords = mailbox.Capabilities.AllowsCustomKeywords;
                     state.WritableKeywords = mailbox.Capabilities.WritableKeywords.ToList();
@@ -281,11 +288,10 @@ namespace LittleCalendar
             foreach (MailboxFolder folder in folders) {
                 MailFolderState existing = state.Folders.FirstOrDefault(x => x.FolderId == folder.FullName);
                 if (existing == null) state.Folders.Add(new MailFolderState {
-                    FolderId = folder.FullName, DisplayName = folder.DisplayName, Enabled = true, UidValidity = folder.UidValidity
+                    FolderId = folder.FullName, DisplayName = folder.DisplayName, Enabled = true
                 });
                 else {
                     existing.DisplayName = folder.DisplayName;
-                    if (existing.UidValidity == 0) existing.UidValidity = folder.UidValidity;
                 }
             }
         }
@@ -302,6 +308,16 @@ namespace LittleCalendar
         {
             value = (value ?? "未知错误").Replace("\r", " ").Replace("\n", " ");
             return value.Length <= 300 ? value : value.Substring(0, 300);
+        }
+        private static string SummaryFolderName(string value)
+        {
+            switch ((value ?? "").Trim().ToLowerInvariant()) {
+                case "inbox": case "收件箱": return "收件箱";
+                case "junk": case "spam": case "垃圾邮件": return "垃圾邮件";
+                case "广告邮件": return "广告邮件";
+                case "订阅邮件": return "订阅邮件";
+                default: return "邮箱文件夹";
+            }
         }
         private static int NormalizeDays(int days)
         {

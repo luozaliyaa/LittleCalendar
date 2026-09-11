@@ -32,6 +32,7 @@ namespace LittleCalendar
     {
         public DateTime Since { get; set; }
         public uint MinimumUid { get; set; }
+        public uint UidValidity { get; set; }
     }
 
     public sealed class MailMessageLocator
@@ -213,6 +214,9 @@ namespace LittleCalendar
     public sealed class MailFolderSyncSummary
     {
         public string DisplayName { get; set; }
+        public uint PreviousUidValidity { get; set; }
+        public uint AttemptedUidValidity { get; set; }
+        public uint FinalUidValidity { get; set; }
         public uint PreviousUid { get; set; }
         public uint RequestedMinimumUid { get; set; }
         public uint FinalUid { get; set; }
