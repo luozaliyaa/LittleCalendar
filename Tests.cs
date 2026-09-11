@@ -207,6 +207,31 @@ internal static class CalendarTests
             Check(service.Handle("今天要做什么", now).Text == local.Text, "Model failure lost deterministic answer");
             Check(history.Load().Messages.Last().Text == local.Text && !File.ReadAllText(history.FilePath).Contains("private exception"), "Fallback history lost text or persisted exception");
         });
+        Test("chat long local fallback keeps whole rows and matching IDs with an omission count", delegate {
+            string directory = Path.Combine(root, "chat-long-fallback");
+            var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => {
+                for (int i = 0; i < 50; i++) data.Items.Add(new Todo { Title = "任务" + i.ToString("D2") + new string('长', 225) + "结束" + i.ToString("D2"), Date = "2026-09-10", Time = "14:00" });
+            });
+            var secret = new SecretStore(directory); var agent = new FakeChatAgent(); var history = new ChatHistoryStore(directory);
+            var service = new ChatAssistantService(controller, secret, agent, null, null, history);
+            ChatMessage noKey = service.Handle("今天要做什么", new DateTime(2026, 9, 10, 9, 0, 0));
+            secret.Save("sk-testkey"); agent.Fail = true;
+            ChatMessage failedModel = service.Handle("今天要做什么", new DateTime(2026, 9, 10, 9, 1, 0));
+            foreach (ChatMessage result in new[] { noKey, failedModel, history.Load().Messages.Last() }) {
+                string[] lines = result.Text.Split('\n');
+                Check(result.Text.Length <= 4000 && lines.Length > 1 && lines.Length < 51, "Fallback exceeded text budget or contained no useful rows");
+                int shown = lines.Length - 1;
+                Check(lines.Last() == "还有 " + (50 - shown) + " 项未展开", "Fallback has no complete omission notice");
+                Check(result.TodoIds.Count == shown, "Fallback IDs include unrepresented tasks");
+                for (int i = 0; i < shown; i++) {
+                    Todo represented = controller.Data.Items.Single(item => item.Id == result.TodoIds[i]);
+                    Check(lines[i] == "待办 · 2026-09-10 14:00 · " + represented.Title, "Fallback cut a row or mismatched its ID");
+                }
+            }
+            Check(noKey.Text == failedModel.Text && noKey.TodoIds.SequenceEqual(failedModel.TodoIds), "Model failure changed bounded local facts");
+            Check(agent.Request.Items.Count == 50 && agent.Request.Items.All(item => item.Title.Length <= 200), "Complete local titles removed model field limits");
+        });
         Test("chat language boundary strips mail content and limits context", delegate {
             string directory = Path.Combine(root, "chat-service-bounds");
             var controller = new CalendarController(new CalendarStore(directory));
@@ -277,6 +302,32 @@ internal static class CalendarTests
             var format = (Dictionary<string, object>)((Dictionary<string, object>)shape["text"])["format"];
             var schema = (Dictionary<string, object>)format["schema"];
             Check((string)format["type"] == "json_schema" && !(bool)schema["additionalProperties"] && !(bool)shape["store"] && !shape.ContainsKey("tools"), "Chat transport omitted strict schema or enabled tool/storage capability");
+        });
+        foreach (string invalidJson in new[] {
+            "{'answer':'private-invalid','todoIds':[]}", "{answer:\"private-invalid\",todoIds:[]}",
+            "{\"answer\":\"private-invalid\",\"answer\":\"second\",\"todoIds\":[]}",
+            "{\"answer\":\"private-invalid\",\"\\u0061nswer\":\"second\",\"todoIds\":[]}",
+            "{\"answer\":\"private-invalid\",\"todoIds\":[],}", "{\"answer\":\"private-invalid\",\"todoIds\":[\"id\",]}",
+            "/*comment*/{\"answer\":\"private-invalid\",\"todoIds\":[]}",
+            "{\"answer\":\"private-invalid\",/*comment*/\"todoIds\":[]}",
+            "{\"answer\":\"private-invalid\",\"todoIds\":[]} trailing", "{\"answer\":\"private-invalid\",\"todoIds\":[]}{}",
+            "{\"answer\":\"bad\\x41\",\"todoIds\":[]}", "{\"answer\":\"line\nbreak\",\"todoIds\":[]}"
+        }) {
+            string malformed = invalidJson;
+            Test("chat strict JSON rejects " + malformed.Replace('\n', ' '), delegate {
+                Throws(() => ChatLanguageReplies.Parse(malformed, new ChatLanguageRequest()));
+            });
+        }
+        Test("chat strict JSON accepts valid escapes and malformed syntax falls back without persistence", delegate {
+            ChatLanguageReply escaped = ChatLanguageReplies.Parse(" \r\n{\"answer\":\"中文 \\u4e2d \\uD83D\\uDE00 \\\"引号\\\" \\\\ 路径\\/末尾\\t制表\",\"todoIds\":[]} \t", new ChatLanguageRequest());
+            Check(escaped.Answer == "中文 中 😀 \"引号\" \\ 路径/末尾\t制表", "Valid escaped JSON changed meaning");
+            string directory = Path.Combine(root, "chat-strict-fallback");
+            var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => data.Items.Add(new Todo { Title = "核对资料", Date = "2026-09-10", Time = "15:00" }));
+            var secret = new SecretStore(directory); secret.Save("sk-testkey"); var history = new ChatHistoryStore(directory);
+            var agent = new FakeChatAgent { Answer = "{'answer':'private-invalid-syntax','todoIds':[]}" };
+            ChatMessage response = new ChatAssistantService(controller, secret, agent, null, null, history).Handle("今天要做什么", new DateTime(2026, 9, 10, 9, 0, 0));
+            Check(response.Text.Contains("核对资料") && !File.ReadAllText(history.FilePath).Contains("private-invalid-syntax"), "Invalid syntax replaced local facts or reached history");
         });
         Test("chat failed sync returns safe retry guidance and preserves history", delegate {
             string directory = Path.Combine(root, "chat-sync-failure"); var history = new ChatHistoryStore(directory);

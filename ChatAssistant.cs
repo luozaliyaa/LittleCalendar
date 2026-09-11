@@ -21,13 +21,21 @@ namespace LittleCalendar
         public List<Todo> Overdue;
         public List<Todo> Due;
         public string DeterministicText;
+        internal List<TaskQueryRow> Rows;
 
         public TaskQueryResult()
         {
             Overdue = new List<Todo>();
             Due = new List<Todo>();
             DeterministicText = "";
+            Rows = new List<TaskQueryRow>();
         }
+    }
+
+    internal sealed class TaskQueryRow
+    {
+        public string TodoId;
+        public string Text;
     }
 
     public static class ChatIntentRouter
@@ -83,7 +91,8 @@ namespace LittleCalendar
                 Overdue = selected.Where(item => item.IsOverdue).Select(item => item.Todo).ToList(),
                 Due = selected.Where(item => !item.IsOverdue).Select(item => item.Todo).ToList()
             };
-            result.DeterministicText = Describe(selected);
+            result.Rows = selected.Select(item => new TaskQueryRow { TodoId = item.Todo.Id, Text = Describe(new[] { item }) }).ToList();
+            result.DeterministicText = String.Join("\n", result.Rows.Select(row => row.Text));
             return result;
         }
 
@@ -138,7 +147,7 @@ namespace LittleCalendar
                 text.Append(" · ");
                 text.Append(item.DueInstant.LocalDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
                 text.Append(" · ");
-                text.Append(item.Todo.Title ?? "");
+                text.Append(Regex.Replace(item.Todo.Title ?? "", @"[\r\n]+", " "));
             }
             return text.ToString();
         }
@@ -182,23 +191,23 @@ namespace LittleCalendar
                 if (intent.Kind == ChatIntentKind.SyncMailIncremental) response = Sync(timestamp);
                 else {
                     foreach (Todo item in snapshot.Items) {
-                        item.Title = clean(item.Title, 200);
+                        item.Title = clean(item.Title, 4000);
                         item.Notes = item.EmailSource == null ? clean(item.Notes, 500) : "";
                         item.EmailSource = null;
                     }
                     TaskQueryRange range = intent.Kind == ChatIntentKind.ListTasks ? intent.Range : TaskQueryRange.FourteenDays;
                     TaskQueryResult facts = TaskQueryService.Query(snapshot, now, range);
-                    string local = String.IsNullOrWhiteSpace(facts.DeterministicText) ? "当前范围内暂无待办。" : facts.DeterministicText;
-                    if (intent.Kind == ChatIntentKind.Chat) local = "可以询问今天、明天或未来七天的待办，也可以输入“读取新邮件”。\n" + local;
+                    List<string> ids;
+                    string local = BoundedLocalText(facts, intent.Kind == ChatIntentKind.Chat, out ids);
                     ChatDisplay display = ChatDisplay.LocalSummary(local);
-                    List<string> ids = facts.Overdue.Concat(facts.Due).Select(item => item.Id).ToList();
+                    List<string> queryIds = facts.Overdue.Concat(facts.Due).Select(item => item.Id).ToList();
                     if (languageAgent != null && !String.IsNullOrWhiteSpace(apiKey)) {
                         try {
                             ChatLanguageRequest request = CreateRequest(facts, question, now, range);
                             ChatLanguageReply reply = languageAgent.Reply(request, apiKey, snapshot.Agent.Model);
                             if (reply == null || String.IsNullOrWhiteSpace(reply.Answer)) throw new System.IO.InvalidDataException();
                             display = ChatDisplay.AssistantAnswer(clean(reply.Answer, 4000));
-                            ids = reply.TodoIds.Where(id => ids.Contains(id)).Distinct(StringComparer.Ordinal).Take(50).ToList();
+                            ids = reply.TodoIds.Where(id => queryIds.Contains(id)).Distinct(StringComparer.Ordinal).Take(50).ToList();
                         } catch { /* Deterministic facts remain available; never persist exception text. */ }
                     }
                     response = ChatMessage.FromDisplay("assistant", display, timestamp, intentName, ids);
@@ -206,6 +215,28 @@ namespace LittleCalendar
                 history.Append(response);
                 return response;
             }
+        }
+
+        private static string BoundedLocalText(TaskQueryResult facts, bool generalChat, out List<string> ids)
+        {
+            const int budget = 4000;
+            ids = new List<string>();
+            var text = new StringBuilder();
+            if (generalChat) text.Append("可以询问今天、明天或未来七天的待办，也可以输入“读取新邮件”。\n");
+            if (facts.Rows.Count == 0) return text.Append("当前范围内暂无待办。").ToString();
+            foreach (TaskQueryRow row in facts.Rows) {
+                int remaining = facts.Rows.Count - ids.Count - 1;
+                string separator = ids.Count == 0 ? "" : "\n";
+                string notice = remaining == 0 ? "" : "\n还有 " + remaining + " 项未展开";
+                if (text.Length + separator.Length + row.Text.Length + notice.Length > budget) break;
+                text.Append(separator).Append(row.Text); ids.Add(row.TodoId);
+            }
+            int omitted = facts.Rows.Count - ids.Count;
+            if (omitted > 0) {
+                if (ids.Count > 0) text.Append('\n');
+                text.Append("还有 " + omitted + " 项未展开");
+            }
+            return text.ToString();
         }
 
         private ChatMessage Sync(string timestamp)
@@ -267,7 +298,7 @@ namespace LittleCalendar
             foreach (Todo item in facts.Overdue.Concat(facts.Due).Take(50)) {
                 DateTimeOffset due = item.Deadline != null ? Deadlines.End(item.Deadline) :
                     new DateTimeOffset(Dates.Parse(item.Date).Add(Dates.IsTime(item.Time) ? Dates.Time(item.Time) : TimeSpan.Zero));
-                request.Items.Add(new ChatLanguageItem { Id = item.Id, Title = item.Title, DueInstant = due.ToString("o", CultureInfo.InvariantCulture),
+                request.Items.Add(new ChatLanguageItem { Id = item.Id, Title = ChatDisplay.Clean(item.Title, 200), DueInstant = due.ToString("o", CultureInfo.InvariantCulture),
                     Important = item.Important, DeadlineConfirmed = item.Deadline == null || item.Deadline.Confirmed, NoteExcerpt = item.Notes });
             }
             return request;

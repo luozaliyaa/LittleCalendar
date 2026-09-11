@@ -214,6 +214,7 @@ namespace LittleCalendar
         public static ChatLanguageReply Parse(string content, ChatLanguageRequest request)
         {
             try {
+                StrictJsonSyntax.Validate(content);
                 var json = new JavaScriptSerializer { MaxJsonLength = 32768 };
                 var shape = json.Deserialize<Dictionary<string, object>>(content);
                 if (shape == null || shape.Count != 2 || !shape.ContainsKey("answer") || !shape.ContainsKey("todoIds") || !(shape["answer"] is string))
@@ -232,6 +233,110 @@ namespace LittleCalendar
                 return new ChatLanguageReply(clean, validated);
             } catch { throw new InvalidDataException("助手返回的内容格式无效。"); }
         }
+    }
+
+    // JavaScriptSerializer accepts JavaScript extensions; validate JSON grammar first.
+    internal sealed class StrictJsonSyntax
+    {
+        private readonly string text;
+        private int position;
+        private StrictJsonSyntax(string text) { this.text = text; }
+        public static void Validate(string text)
+        {
+            if (text == null || text.Length > 32768) throw new InvalidDataException();
+            var parser = new StrictJsonSyntax(text);
+            parser.Value(0); parser.Space();
+            if (parser.position != text.Length) throw new InvalidDataException();
+        }
+        private void Value(int depth)
+        {
+            if (depth > 64) throw new InvalidDataException();
+            Space();
+            if (position >= text.Length) throw new InvalidDataException();
+            char token = text[position];
+            if (token == '"') { StringValue(); return; }
+            if (token == '{') {
+                position++; Space();
+                var names = new HashSet<string>(StringComparer.Ordinal);
+                if (Take('}')) return;
+                do {
+                    Space();
+                    if (!names.Add(StringValue())) throw new InvalidDataException();
+                    Space(); Require(':'); Value(depth + 1); Space();
+                    if (Take('}')) return;
+                    Require(',');
+                } while (true);
+            }
+            if (token == '[') {
+                position++; Space();
+                if (Take(']')) return;
+                do {
+                    Value(depth + 1); Space();
+                    if (Take(']')) return;
+                    Require(',');
+                } while (true);
+            }
+            if (token == 't') { Literal("true"); return; }
+            if (token == 'f') { Literal("false"); return; }
+            if (token == 'n') { Literal("null"); return; }
+            Take('-');
+            if (!Take('0')) Digits();
+            if (Take('.')) Digits();
+            if (Take('e') || Take('E')) { if (!Take('+')) Take('-'); Digits(); }
+        }
+        private string StringValue()
+        {
+            Require('"');
+            var result = new StringBuilder();
+            while (position < text.Length) {
+                char value = text[position++];
+                if (value == '"') return result.ToString();
+                if (value < 0x20) throw new InvalidDataException();
+                if (value != '\\') { result.Append(value); continue; }
+                if (position >= text.Length) throw new InvalidDataException();
+                char escape = text[position++];
+                switch (escape) {
+                    case '"': case '\\': case '/': result.Append(escape); break;
+                    case 'b': result.Append('\b'); break;
+                    case 'f': result.Append('\f'); break;
+                    case 'n': result.Append('\n'); break;
+                    case 'r': result.Append('\r'); break;
+                    case 't': result.Append('\t'); break;
+                    case 'u':
+                        int code = 0;
+                        for (int i = 0; i < 4; i++) {
+                            if (position >= text.Length) throw new InvalidDataException();
+                            char hex = text[position++];
+                            int digit = hex >= '0' && hex <= '9' ? hex - '0' : hex >= 'a' && hex <= 'f' ? hex - 'a' + 10 : hex >= 'A' && hex <= 'F' ? hex - 'A' + 10 : -1;
+                            if (digit < 0) throw new InvalidDataException();
+                            code = code * 16 + digit;
+                        }
+                        result.Append((char)code); break;
+                    default: throw new InvalidDataException();
+                }
+            }
+            throw new InvalidDataException();
+        }
+        private void Digits()
+        {
+            int start = position;
+            while (position < text.Length && text[position] >= '0' && text[position] <= '9') position++;
+            if (position == start) throw new InvalidDataException();
+        }
+        private void Literal(string expected)
+        {
+            foreach (char value in expected) Require(value);
+        }
+        private void Space()
+        {
+            while (position < text.Length && (text[position] == ' ' || text[position] == '\t' || text[position] == '\r' || text[position] == '\n')) position++;
+        }
+        private bool Take(char expected)
+        {
+            if (position >= text.Length || text[position] != expected) return false;
+            position++; return true;
+        }
+        private void Require(char expected) { if (!Take(expected)) throw new InvalidDataException(); }
     }
 
     public static class ChatLanguagePrompts
