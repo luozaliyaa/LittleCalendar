@@ -143,4 +143,134 @@ namespace LittleCalendar
             return text.ToString();
         }
     }
+
+    public sealed class ChatAssistantService
+    {
+        private readonly CalendarController controller;
+        private readonly SecretStore secrets;
+        private readonly IChatLanguageAgent languageAgent;
+        private readonly MailSyncCoordinator mailSync;
+        private readonly MailStateStore mailState;
+        private readonly ChatHistoryStore history;
+        private readonly object gate = new object();
+
+        public ChatAssistantService(CalendarController controller, SecretStore secrets, IChatLanguageAgent languageAgent,
+            MailSyncCoordinator mailSync, MailStateStore mailState, ChatHistoryStore history)
+        {
+            this.controller = controller; this.secrets = secrets; this.languageAgent = languageAgent;
+            this.mailSync = mailSync; this.mailState = mailState; this.history = history;
+        }
+
+        public ChatMessage Handle(string text, DateTime now)
+        {
+            lock (gate) {
+                string apiKey = LoadSecret(secrets);
+                string mailKey = secrets == null ? "" : LoadSecret(new MailSecretStore(System.IO.Path.GetDirectoryName(secrets.FilePath)));
+                var privateValues = new List<string> { apiKey, mailKey };
+                CalendarData snapshot = controller.Store.Copy(controller.Data);
+                foreach (Todo item in snapshot.Items.Where(item => item.EmailSource != null)) {
+                    privateValues.Add(item.EmailSource.Subject); privateValues.Add(item.EmailSource.Sender);
+                    privateValues.Add(item.Notes);
+                }
+                Func<string, int, string> clean = (value, limit) => CleanKnown(value, privateValues, limit);
+                string question = clean(text, 2000);
+                ChatIntent intent = ChatIntentRouter.Parse(question);
+                string intentName = intent.Kind == ChatIntentKind.SyncMailIncremental ? "sync_mail_incremental" : intent.Kind == ChatIntentKind.ListTasks ? "list_tasks" : "chat";
+                string timestamp = new DateTimeOffset(now).ToString("o", CultureInfo.InvariantCulture);
+                history.Append(ChatMessage.FromDisplay("user", ChatDisplay.UserInput(question), timestamp, intentName));
+                ChatMessage response;
+                if (intent.Kind == ChatIntentKind.SyncMailIncremental) response = Sync(timestamp);
+                else {
+                    foreach (Todo item in snapshot.Items) {
+                        item.Title = clean(item.Title, 200);
+                        item.Notes = item.EmailSource == null ? clean(item.Notes, 500) : "";
+                        item.EmailSource = null;
+                    }
+                    TaskQueryRange range = intent.Kind == ChatIntentKind.ListTasks ? intent.Range : TaskQueryRange.FourteenDays;
+                    TaskQueryResult facts = TaskQueryService.Query(snapshot, now, range);
+                    string local = String.IsNullOrWhiteSpace(facts.DeterministicText) ? "当前范围内暂无待办。" : facts.DeterministicText;
+                    if (intent.Kind == ChatIntentKind.Chat) local = "可以询问今天、明天或未来七天的待办，也可以输入“读取新邮件”。\n" + local;
+                    ChatDisplay display = ChatDisplay.LocalSummary(local);
+                    List<string> ids = facts.Overdue.Concat(facts.Due).Select(item => item.Id).ToList();
+                    if (languageAgent != null && !String.IsNullOrWhiteSpace(apiKey)) {
+                        try {
+                            ChatLanguageRequest request = CreateRequest(facts, question, now, range);
+                            ChatLanguageReply reply = languageAgent.Reply(request, apiKey, snapshot.Agent.Model);
+                            if (reply == null || String.IsNullOrWhiteSpace(reply.Answer)) throw new System.IO.InvalidDataException();
+                            display = ChatDisplay.AssistantAnswer(clean(reply.Answer, 4000));
+                            ids = reply.TodoIds.Where(id => ids.Contains(id)).Distinct(StringComparer.Ordinal).Take(50).ToList();
+                        } catch { /* Deterministic facts remain available; never persist exception text. */ }
+                    }
+                    response = ChatMessage.FromDisplay("assistant", display, timestamp, intentName, ids);
+                }
+                history.Append(response);
+                return response;
+            }
+        }
+
+        private ChatMessage Sync(string timestamp)
+        {
+            var summary = new ChatSyncSummary { StartedAt = timestamp };
+            string text;
+            try {
+                if (mailSync == null || mailState == null) throw new InvalidOperationException();
+                summary.PreviousCompletedAt = mailState.Load().LastCompletedAt;
+                MailSyncResult result = mailSync.RunIncremental();
+                MailSyncState state = mailState.Load();
+                summary.StartedAt = state.LastStartedAt; summary.CompletedAt = state.LastCompletedAt;
+                summary.ScannedCount = result.ScannedCount; summary.CreatedCount = result.CreatedCount;
+                summary.NoticeCount = result.NoticeCount; summary.ErrorCount = result.Errors.Count;
+                // The sync result does not distinguish ignored mail from duplicates or failures.
+                // Leave the legacy ignored-count field unset rather than inventing a classification.
+                int number = 0;
+                foreach (MailFolderSyncSummary folder in result.Folders.Take(50)) {
+                    number++;
+                    summary.Folders.Add(new ChatFolderCursorSummary {
+                        DisplayName = "文件夹 " + number, PreviousScannedAt = folder.PreviousScannedAt, CompletedAt = folder.CompletedAt,
+                        PreviousUid = folder.PreviousUid, RequestedMinimumUid = folder.RequestedMinimumUid, FinalUid = folder.FinalUid,
+                        FetchedCount = folder.FetchedCount, Error = String.IsNullOrWhiteSpace(folder.Error) ? "" : "同步出错"
+                    });
+                }
+                var lines = new StringBuilder();
+                lines.Append(summary.ErrorCount == 0 && summary.Folders.All(folder => folder.Error.Length == 0) ? "邮箱增量同步完成。" : "邮箱增量同步部分完成，请重试失败的文件夹。");
+                lines.Append("\n上次完成：" + TimestampLabel(summary.PreviousCompletedAt));
+                lines.Append("\n开始：" + TimestampLabel(summary.StartedAt) + "；完成：" + TimestampLabel(summary.CompletedAt));
+                lines.Append("\n扫描 " + summary.ScannedCount + " 封；新增待办 " + summary.CreatedCount + " 项；通知 " + summary.NoticeCount + " 条；错误 " + summary.ErrorCount + " 项。");
+                foreach (ChatFolderCursorSummary folder in summary.Folders) {
+                    lines.Append("\n" + folder.DisplayName + "：上次扫描 " + TimestampLabel(folder.PreviousScannedAt) + "；完成 " + TimestampLabel(folder.CompletedAt));
+                    lines.Append("；UID " + folder.PreviousUid + " → 请求 " + folder.RequestedMinimumUid + " → " + folder.FinalUid + "；读取 " + folder.FetchedCount + " 封");
+                    if (folder.Error.Length > 0) lines.Append("；同步出错，请重试");
+                }
+                text = lines.ToString();
+            } catch {
+                summary.ErrorCount = Math.Max(1, summary.ErrorCount);
+                text = "邮箱增量同步未完成，请检查邮箱设置、授权码和网络后重试。\n开始：" + timestamp;
+            }
+            return ChatMessage.FromDisplay("assistant", ChatDisplay.LocalSummary(text), timestamp, "sync_mail_incremental", sync: summary);
+        }
+
+        private static string TimestampLabel(string value) { return String.IsNullOrWhiteSpace(value) ? "无记录" : value; }
+        private static string LoadSecret(ProtectedSecretStore store) { try { return store == null ? "" : store.Load(); } catch { return ""; } }
+        private static string CleanKnown(string value, IEnumerable<string> privateValues, int limit)
+        {
+            value = value ?? "";
+            foreach (string secret in privateValues.Where(item => !String.IsNullOrWhiteSpace(item)).OrderByDescending(item => item.Length))
+                value = value.Replace(secret, "[REDACTED]");
+            return ChatDisplay.Clean(value, limit);
+        }
+        private static ChatLanguageRequest CreateRequest(TaskQueryResult facts, string question, DateTime now, TaskQueryRange range)
+        {
+            var request = new ChatLanguageRequest {
+                CurrentTime = new DateTimeOffset(now).ToString("o", CultureInfo.InvariantCulture), Timezone = TimeZoneInfo.Local.Id,
+                Question = question, RangeLabel = range == TaskQueryRange.Today ? "今天（含逾期）" : range == TaskQueryRange.Tomorrow ? "明天（含逾期）" : range == TaskQueryRange.SevenDays ? "未来七天（含逾期）" : "未来十四天（含逾期）"
+            };
+            foreach (Todo item in facts.Overdue.Concat(facts.Due).Take(50)) {
+                DateTimeOffset due = item.Deadline != null ? Deadlines.End(item.Deadline) :
+                    new DateTimeOffset(Dates.Parse(item.Date).Add(Dates.IsTime(item.Time) ? Dates.Time(item.Time) : TimeSpan.Zero));
+                request.Items.Add(new ChatLanguageItem { Id = item.Id, Title = item.Title, DueInstant = due.ToString("o", CultureInfo.InvariantCulture),
+                    Important = item.Important, DeadlineConfirmed = item.Deadline == null || item.Deadline.Confirmed, NoteExcerpt = item.Notes });
+            }
+            return request;
+        }
+    }
 }

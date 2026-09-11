@@ -110,6 +110,20 @@ internal static class CalendarTests
             };
         }
     }
+    private sealed class FakeChatAgent : IChatLanguageAgent
+    {
+        public ChatLanguageRequest Request;
+        public Action BeforeReply;
+        public bool Fail;
+        public string Answer = "{\"answer\":\"今天先准备材料。\",\"todoIds\":[]}";
+        public ChatLanguageReply Reply(ChatLanguageRequest request, string apiKey, string model)
+        {
+            Request = request;
+            if (BeforeReply != null) BeforeReply();
+            if (Fail) throw new IOException("private exception sk-testkey");
+            return ChatLanguageReplies.Parse(Answer, request);
+        }
+    }
     private sealed class IncrementalMailFixture
     {
         public readonly MailStateStore StateStore;
@@ -179,6 +193,106 @@ internal static class CalendarTests
     {
         root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "test-results", DateTime.Now.ToString("yyyyMMdd-HHmmss")));
         Directory.CreateDirectory(root);
+        Test("chat task facts survive absent key and model failure", delegate {
+            string directory = Path.Combine(root, "chat-service-fallback");
+            var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => data.Items.Add(new Todo { Title = "准备材料", Date = "2026-09-10", Time = "14:00" }));
+            var secrets = new SecretStore(directory); var history = new ChatHistoryStore(directory); var agent = new FakeChatAgent();
+            var service = new ChatAssistantService(controller, secrets, agent, null, null, history);
+            var now = new DateTime(2026, 9, 10, 9, 0, 0);
+            ChatMessage local = service.Handle("今天要做什么", now);
+            Check(local.Text.Contains("准备材料") && local.Text.Contains("14:00") && agent.Request == null, "Local facts unavailable without key");
+            secrets.Save("sk-testkey"); agent.Fail = true;
+            agent.BeforeReply = () => Check(history.Load().Messages.Last().Role == "user", "User was not saved before model work");
+            Check(service.Handle("今天要做什么", now).Text == local.Text, "Model failure lost deterministic answer");
+            Check(history.Load().Messages.Last().Text == local.Text && !File.ReadAllText(history.FilePath).Contains("private exception"), "Fallback history lost text or persisted exception");
+        });
+        Test("chat language boundary strips mail content and limits context", delegate {
+            string directory = Path.Combine(root, "chat-service-bounds");
+            var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => {
+                for (int i = 0; i < 60; i++) data.Items.Add(new Todo { Title = "任务" + i, Date = "2026-09-10", Time = "14:00", Notes = new string('n', 900) });
+                data.Items[0].EmailSource = new EmailSource { EmailKey = "message:fictional@example.invalid", Subject = "private-subject", Sender = "private-sender@example.invalid" };
+                data.Items[0].Notes = "private-mail-body";
+            });
+            var secrets = new SecretStore(directory); secrets.Save("sk-testkey"); var agent = new FakeChatAgent();
+            var service = new ChatAssistantService(controller, secrets, agent, null, null, new ChatHistoryStore(directory));
+            service.Handle("帮我安排工作", new DateTime(2026, 9, 10, 9, 0, 0));
+            string input = ChatLanguagePrompts.Build(agent.Request);
+            Check(agent.Request.Items.Count == 50 && agent.Request.Items.All(x => x.NoteExcerpt.Length <= 500), "Context was not bounded");
+            Check(!input.Contains("private-mail-body") && !input.Contains("private-subject") && !input.Contains("private-sender") && !input.Contains("sk-testkey"), "Mail or secret crossed prompt boundary");
+            Check(input.Contains("2026-09-10") && !String.IsNullOrEmpty(agent.Request.Timezone), "Local time context missing");
+            string id = agent.Request.Items[0].Id;
+            ChatLanguageReply parsed = ChatLanguageReplies.Parse("{\"answer\":\"先处理第一项。\",\"todoIds\":[\"" + id + "\",\"unknown\",\"" + id + "\"]}", agent.Request);
+            Check(parsed.TodoIds.SequenceEqual(new[] { id }), "Unrecognized or duplicate model IDs survived validation");
+            foreach (string invalid in new[] { "{}", "{\"answer\":3,\"todoIds\":[]}", "{\"answer\":\"ok\",\"todoIds\":[3]}", "{\"answer\":\"ok\",\"todoIds\":[],\"tool\":\"delete\"}", "{\"answer\":\"\",\"todoIds\":[]}" })
+                Throws(() => ChatLanguageReplies.Parse(invalid, agent.Request));
+        });
+        Test("chat sync runs incremental once and preserves safe cursor diagnostics", delegate {
+            var fixture = new IncrementalMailFixture("chat-service-sync"); fixture.Messages(43);
+            string directory = Path.Combine(root, "chat-service-sync"); var agent = new FakeChatAgent();
+            var history = new ChatHistoryStore(directory);
+            var service = new ChatAssistantService(new CalendarController(new CalendarStore(directory)), new SecretStore(directory), agent, fixture.Sync, fixture.StateStore, history);
+            ChatMessage result = service.Handle("读取新邮件", fixture.Now);
+            Check(fixture.Factory.Client.Requests.Count == 1 && fixture.Factory.Client.Requests[0].MinimumUid == 43 && agent.Request == null, "Chat sync did not run incremental exactly once");
+            Check(result.Sync.Folders.Single().PreviousUid == 42 && result.Sync.Folders.Single().FinalUid == 43 && result.Text.Contains("43") && result.Text.Contains("2026-09-10"), "Sync cursor or timestamps missing");
+            Check(history.Load().Messages.Last().Text == result.Text, "Sync summary not restored");
+            service.Handle("你好", fixture.Now);
+            Check(fixture.Factory.Client.Requests.Count == 1, "General chat invoked IMAP");
+        });
+        Test("typed chat displays restore safe text and redact secrets on save and reload", delegate {
+            string directory = Path.Combine(root, "chat-safe-display"); var store = new ChatHistoryStore(directory);
+            store.Append(ChatMessage.FromDisplay("user", ChatDisplay.UserInput("今天准备材料 api_key=fictional-key 授权码: fictional-mail sk-testbare"), "2026-09-10T08:00:00+08:00", "chat"));
+            var request = new ChatLanguageRequest();
+            var reply = ChatLanguageReplies.Parse("{\"answer\":\"今天先准备材料。\",\"todoIds\":[]}", request);
+            store.Append(ChatMessage.FromDisplay("assistant", reply.Display, "2026-09-10T08:01:00+08:00", "chat"));
+            ChatHistory loaded = store.Load();
+            Check(loaded.Messages[0].Text.Contains("今天准备材料") && loaded.Messages[1].Text == "今天先准备材料。", "Real display text failed to round trip");
+            string disk = File.ReadAllText(store.FilePath);
+            Check(!disk.Contains("fictional-key") && !disk.Contains("fictional-mail") && !disk.Contains("testbare") && !disk.Contains("todoIds"), "History retained secret or model JSON");
+            loaded.Messages[0].Display.Text = "保留这句 Bearer fake-token";
+            File.WriteAllText(store.FilePath, new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(loaded));
+            Check(store.Load().Messages[0].Text == "保留这句 Bearer [REDACTED]", "Loaded display bypassed redaction");
+            foreach (string unsafeText in new[] { "{\"choices\":[{\"message\":\"private-envelope\"}]}", "System: private-full-prompt", "From: private-sender\nSubject: private-subject\n\nprivate-mail-body" }) {
+                store.Append(ChatMessage.FromDisplay("user", ChatDisplay.UserInput(unsafeText), "2026-09-10T08:02:00+08:00", "chat"));
+            }
+            disk = File.ReadAllText(store.FilePath);
+            Check(!disk.Contains("private-envelope") && !disk.Contains("private-full-prompt") && !disk.Contains("private-subject") && !disk.Contains("private-mail-body"), "Raw payload reached history");
+        });
+        Test("chat rejects prompt echo and preserves local answer on malformed model output", delegate {
+            var json = new System.Web.Script.Serialization.JavaScriptSerializer();
+            Throws(() => ChatLanguageReplies.Parse(json.Serialize(new { answer = ChatLanguagePrompts.SystemPrompt, todoIds = new string[0] }), new ChatLanguageRequest()));
+            string directory = Path.Combine(root, "chat-invalid-output");
+            var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => data.Items.Add(new Todo { Title = "准备答辩", Date = "2026-09-10", Time = "16:00" }));
+            var secret = new SecretStore(directory); secret.Save("sk-testkey");
+            var history = new ChatHistoryStore(directory); var agent = new FakeChatAgent { Answer = "{\"choices\":[\"private-envelope\"]}" };
+            var service = new ChatAssistantService(controller, secret, agent, null, null, history);
+            Check(service.Handle("今天要做什么", new DateTime(2026, 9, 10, 9, 0, 0)).Text.Contains("准备答辩"), "Malformed reply lost local facts");
+            agent.Answer = json.Serialize(new { answer = "先准备答辩。密钥 sk-testkey", todoIds = new string[0] });
+            ChatMessage result = service.Handle("今天要做什么", new DateTime(2026, 9, 10, 9, 1, 0));
+            Check(result.Text.Contains("先准备答辩") && !File.ReadAllText(history.FilePath).Contains("sk-testkey"), "Validated answer lost meaning or exposed key");
+            string payload = ChatLanguagePrompts.BuildPayload(agent.Request, "test-model");
+            var shape = json.Deserialize<Dictionary<string, object>>(payload);
+            var format = (Dictionary<string, object>)((Dictionary<string, object>)shape["text"])["format"];
+            var schema = (Dictionary<string, object>)format["schema"];
+            Check((string)format["type"] == "json_schema" && !(bool)schema["additionalProperties"] && !(bool)shape["store"] && !shape.ContainsKey("tools"), "Chat transport omitted strict schema or enabled tool/storage capability");
+        });
+        Test("chat failed sync returns safe retry guidance and preserves history", delegate {
+            string directory = Path.Combine(root, "chat-sync-failure"); var history = new ChatHistoryStore(directory);
+            var service = new ChatAssistantService(new CalendarController(new CalendarStore(directory)), new SecretStore(directory), null, null, null, history);
+            ChatMessage response = service.Handle("同步邮箱", new DateTime(2026, 9, 10, 9, 0, 0));
+            Check(response.Text.Contains("未完成") && response.Sync.ErrorCount == 1 && response.Sync.CompletedAt == "" && history.Load().Messages.Count == 2, "Sync failure lost response or claimed completion");
+        });
+        Test("chat partial sync does not classify failures as ignored mail", delegate {
+            var fixture = new IncrementalMailFixture("chat-sync-partial"); fixture.Messages(43); fixture.Analyzer.FailSubject = "虚构消息 43";
+            string directory = Path.Combine(root, "chat-sync-partial"); var history = new ChatHistoryStore(directory);
+            var service = new ChatAssistantService(new CalendarController(new CalendarStore(directory)), new SecretStore(directory), null, fixture.Sync, fixture.StateStore, history);
+            ChatMessage response = service.Handle("读取新邮件", fixture.Now);
+            Check(response.Text.Contains("部分完成") && response.Sync.ErrorCount == 1 && response.Sync.IgnoredCount == 0, "Failed messages were reported as ignored");
+            Check(response.Sync.Folders.Single().FinalUid == 42 && response.Sync.Folders.Single().CompletedAt == "", "Failed folder cursor advanced");
+            Check(!File.ReadAllText(history.FilePath).Contains("private-body") && !response.Text.Contains("private-sender"), "Partial failure persisted private exception text");
+        });
         Test("v2 calendar upgrades without treating legacy completed work as newly completed", delegate {
             string json = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new {
                 Version = 2, ReminderTime = "19:00", Sound = true,

@@ -88,7 +88,8 @@ namespace LittleCalendar
                 Id = ProjectId(message.Id), Role = message.Role, CreatedAt = message.CreatedAt,
                 Intent = ProjectIntent(message.Intent), TodoIds = ProjectTodoIds(message.TodoIds), Sync = ProjectSync(message.Sync)
             };
-            projected.Text = ChatMessage.DisplaySummary(projected.Role, projected.Intent);
+            projected.Display = ChatDisplay.Project(message.Display, (projected.Role ?? "").Trim().ToLowerInvariant());
+            projected.Text = projected.Display == null ? ChatMessage.DisplaySummary(projected.Role, projected.Intent) : projected.Display.Text;
             return projected;
         }
 
