@@ -38,6 +38,18 @@ namespace LittleCalendar
         }
     }
 
+    public static class MailSearchPolicy
+    {
+        public static SearchQuery CreateQuery(MailFetchRequest request)
+        {
+            if (request == null) throw new ArgumentNullException("request");
+            // An established UID cursor must include delayed mail regardless of its delivery date.
+            if (request.MinimumUid > 0)
+                return SearchQuery.Uids(new UniqueIdRange(new UniqueId(request.MinimumUid), UniqueId.MaxValue));
+            return SearchQuery.DeliveredAfter(request.Since.Date.AddDays(-1));
+        }
+    }
+
     public static class MailStatusPolicy
     {
         public static MailFlagChange Imported() { return new MailFlagChange { AddFlagged = true }; }
@@ -123,9 +135,7 @@ namespace LittleCalendar
             LogRead("SEARCH_START", "folder=" + descriptor.FullName + " since=" + request.Since.ToString("o") + " minimumUid=" + request.MinimumUid);
             try {
                 IMailFolder folder = OpenFolder(descriptor.FullName, FolderAccess.ReadOnly);
-            SearchQuery query = SearchQuery.DeliveredAfter(request.Since.Date.AddDays(-1));
-            if (request.MinimumUid > 0)
-                    query = query.And(SearchQuery.Uids(new UniqueIdRange(new UniqueId(request.MinimumUid), UniqueId.MaxValue)));
+                SearchQuery query = MailSearchPolicy.CreateQuery(request);
                 IList<UniqueId> ids = folder.Search(query);
                 LogRead("SEARCH_RESULT", "folder=" + descriptor.FullName + " count=" + ids.Count);
                 if (ids.Count == 0) return new List<MailMessageSnapshot>();

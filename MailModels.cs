@@ -3,6 +3,8 @@ using System.Collections.Generic;
 
 namespace LittleCalendar
 {
+    public enum MailSyncMode { ManualWindow, AutomaticIncremental, ChatIncremental }
+
     [Flags]
     public enum MailFolderAttributes
     {
@@ -208,6 +210,22 @@ namespace LittleCalendar
         }
     }
 
+    public sealed class MailFolderSyncSummary
+    {
+        public string DisplayName { get; set; }
+        public uint PreviousUid { get; set; }
+        public uint RequestedMinimumUid { get; set; }
+        public uint FinalUid { get; set; }
+        public string PreviousScannedAt { get; set; }
+        public string CompletedAt { get; set; }
+        public int FetchedCount { get; set; }
+        public string Error { get; set; }
+        public MailFolderSyncSummary()
+        {
+            DisplayName = ""; PreviousScannedAt = ""; CompletedAt = ""; Error = "";
+        }
+    }
+
     public sealed class MailSyncResult
     {
         public int ScannedCount { get; set; }
@@ -218,9 +236,11 @@ namespace LittleCalendar
         public List<OpportunityNotice> NewNotices { get; set; }
         public List<Todo> NewlyCompletedItems { get; set; }
         public List<string> Errors { get; set; }
+        public List<MailFolderSyncSummary> Folders { get; set; }
         public MailSyncResult()
         {
             NewTodos = new List<Todo>(); NewNotices = new List<OpportunityNotice>(); NewlyCompletedItems = new List<Todo>(); Errors = new List<string>();
+            Folders = new List<MailFolderSyncSummary>();
         }
     }
 }

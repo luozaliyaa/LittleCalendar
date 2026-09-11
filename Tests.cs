@@ -92,13 +92,46 @@ internal static class CalendarTests
     }
     private sealed class FakeMailAnalyzer : IMailActionAnalyzer
     {
+        public string FailSubject;
+        public Action BeforeAnalyze;
+        public int Calls;
         public MailAction Analyze(NormalizedMail mail, DateTime now, string apiKey, string model)
         {
+            Calls++;
+            if (BeforeAnalyze != null) BeforeAnalyze();
+            if (mail.Subject == FailSubject) throw new IOException("private-body private-sender@example.invalid <private-id@example.invalid> mail-secret deep-secret " + mail.Subject);
             return new MailAction {
                 Disposition = mail.Subject.Contains("笔试") ? "todo" : "ignore", Actionable = mail.Subject.Contains("笔试"), Category = "assessment", Title = "完成 " + mail.Subject,
                 Notes = mail.Text, Important = true, DeadlineKind = "relative", DeadlineAmount = 48,
                 DeadlineUnit = "hours", DeadlineOriginalText = "48小时内", Confidence = 0.95, Reason = "明确笔试要求"
             };
+        }
+    }
+    private sealed class IncrementalMailFixture
+    {
+        public readonly MailStateStore StateStore;
+        public readonly FakeMailFactory Factory = new FakeMailFactory();
+        public readonly FakeMailAnalyzer Analyzer = new FakeMailAnalyzer();
+        public readonly MailSyncCoordinator Sync;
+        public readonly DateTime Now = new DateTime(2026, 9, 10, 9, 0, 0);
+        public IncrementalMailFixture(string name, uint lastUid = 42, uint savedValidity = 7)
+        {
+            string directory = Path.Combine(root, name);
+            StateStore = new MailStateStore(directory);
+            var state = new MailSyncState(); state.Account.Enabled = true; state.Account.Address = "fictional-sync@163.com";
+            state.Folders.Add(new MailFolderState { FolderId = "INBOX", DisplayName = "收件箱", UidValidity = savedValidity, LastUid = lastUid, LastScannedAt = "2026-09-10T08:00:00+08:00" });
+            StateStore.Save(state);
+            var mailSecret = new MailSecretStore(directory); mailSecret.Save("mail-secret");
+            var deepSecret = new SecretStore(directory); deepSecret.Save("deep-secret");
+            Factory.Client.Folders.Add(new MailboxFolder { FullName = "INBOX", DisplayName = "收件箱", UidValidity = 7, Attributes = MailFolderAttributes.Inbox });
+            Sync = new MailSyncCoordinator(new CalendarController(new CalendarStore(directory)), StateStore, mailSecret, deepSecret, Factory, Analyzer, () => Now);
+        }
+        public void Messages(params uint[] uids)
+        {
+            Factory.Client.Messages["INBOX"] = uids.Select(uid => new MailMessageSnapshot {
+                FolderId = "INBOX", UidValidity = 7, Uid = uid, MessageId = "<fictional-sync-" + uid + "@example.invalid>",
+                Subject = "虚构消息 " + uid, Sender = "fictional-sender@example.invalid", SentAt = "2026-08-01T08:00:00+08:00", PlainText = "虚构通知正文"
+            }).ToList();
         }
     }
     private sealed class FakeStructuredMailAgent : IStructuredMailAgent
@@ -603,6 +636,88 @@ internal static class CalendarTests
             MailSyncResult result = sync.Run(false, 3);
             Check(factory.Client.Requests.Single().Since == now.AddDays(-3) && factory.Client.Requests.Single().MinimumUid == 0, "Manual window leaked into all historical UIDs");
             Check(result.CreatedCount == 1 && factory.Client.KeepAliveCalls > 0, "Manual rescan did not reanalyze or keep the mailbox alive");
+        });
+        Test("chat incremental requests the next UID and commits cursor diagnostics only after processing", delegate {
+            var fixture = new IncrementalMailFixture("chat-incremental-cursor"); fixture.Messages(44, 43);
+            fixture.Analyzer.BeforeAnalyze = () => {
+                MailFolderState pending = fixture.StateStore.Load().Folders.Single();
+                Check(pending.LastUid == 42 && pending.LastScannedAt == "2026-09-10T08:00:00+08:00", "Cursor advanced before all messages succeeded");
+            };
+            MailSyncResult result = fixture.Sync.RunIncremental();
+            MailFolderSyncSummary folder = result.Folders.Single();
+            Check(fixture.Factory.Client.Requests.Single().MinimumUid == 43, "Incremental fetch did not request UID 43");
+            Check(folder.DisplayName == "收件箱" && folder.PreviousUid == 42 && folder.RequestedMinimumUid == 43 && folder.FinalUid == 44, "Cursor diagnostic UIDs are incorrect");
+            Check(folder.PreviousScannedAt == "2026-09-10T08:00:00+08:00" && DateTimeOffset.Parse(folder.CompletedAt) == new DateTimeOffset(fixture.Now), "Cursor diagnostic timestamps are incorrect");
+            Check(folder.FetchedCount == 2 && String.IsNullOrEmpty(folder.Error) && result.ScannedCount == 2, "Successful folder diagnostics are incorrect");
+            MailFolderState saved = fixture.StateStore.Load().Folders.Single();
+            Check(saved.LastUid == 44 && saved.LastScannedAt == folder.CompletedAt, "Successful cursor was not persisted");
+        });
+        Test("incremental first sync uses saved window or seven day default without changing automatic schedule", delegate {
+            foreach (int days in new[] { 7, 14 }) {
+                var fixture = new IncrementalMailFixture("chat-initial-" + days);
+                MailSyncState state = fixture.StateStore.Load(); state.Folders.Clear(); state.Account.ManualSyncDays = days; state.LastAutomaticDate = "2026-09-09"; fixture.StateStore.Save(state);
+                MailSyncResult result = fixture.Sync.RunIncremental();
+                Check(fixture.Factory.Client.Requests.Single().MinimumUid == 0 && fixture.Factory.Client.Requests.Single().Since == fixture.Now.AddDays(-days), "Initial recovery window is incorrect");
+                Check(result.Folders.Single().PreviousUid == 0 && fixture.StateStore.Load().LastAutomaticDate == "2026-09-09", "Chat sync changed the automatic schedule");
+            }
+            var automatic = new IncrementalMailFixture("auto-initial", 0);
+            automatic.Sync.Run(true);
+            Check(automatic.Factory.Client.Requests.Single().Since == automatic.Now.AddDays(-7), "Automatic initial scan did not use the recovery window");
+        });
+        Test("UIDVALIDITY change resets to seven day recovery and reports both cursor generations", delegate {
+            var fixture = new IncrementalMailFixture("chat-validity-reset", 42, 6); fixture.Messages(2);
+            MailFolderSyncSummary summary = fixture.Sync.RunIncremental().Folders.Single();
+            Check(fixture.Factory.Client.Requests.Single().MinimumUid == 0 && fixture.Factory.Client.Requests.Single().Since == fixture.Now.AddDays(-7), "UIDVALIDITY reset did not request a recovery scan");
+            Check(summary.PreviousUid == 42 && summary.RequestedMinimumUid == 0 && summary.FinalUid == 2, "Reset diagnostics lost the prior or new cursor");
+            Check(fixture.StateStore.Load().Folders.Single().UidValidity == 7 && fixture.StateStore.Load().Folders.Single().LastUid == 2, "Reset cursor was not saved in the new generation");
+        });
+        Test("failed incremental message leaves the entire folder retryable and suppresses private error details", delegate {
+            var fixture = new IncrementalMailFixture("chat-message-failure"); fixture.Messages(43, 44, 45); fixture.Analyzer.FailSubject = "虚构消息 44";
+            MailFolderSyncSummary summary = fixture.Sync.RunIncremental().Folders.Single();
+            MailFolderState saved = fixture.StateStore.Load().Folders.Single();
+            Check(saved.LastUid == 42 && saved.LastScannedAt == "2026-09-10T08:00:00+08:00", "Failure advanced the persisted cursor or success timestamp");
+            Check(summary.FinalUid == 42 && summary.FetchedCount == 3 && String.IsNullOrEmpty(summary.CompletedAt) && !String.IsNullOrEmpty(summary.Error), "Partial failure diagnostics claim success");
+            string serialized = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(summary);
+            foreach (string sensitive in new[] { "private-body", "private-sender", "private-id", "mail-secret", "deep-secret", "虚构消息", "fictional-sync", "fictional-sender" })
+                Check(!serialized.Contains(sensitive), "Folder summary leaked private message or exception data");
+            fixture.Analyzer.FailSubject = null;
+            MailSyncResult retried = fixture.Sync.RunIncremental();
+            Check(fixture.Factory.Client.Requests.Last().MinimumUid == 43 && fixture.StateStore.Load().Folders.Single().LastUid == 45, "Failed message could not be retried");
+            Check(fixture.Analyzer.Calls == 4 && retried.Errors.Count == 0, "Incremental retry reanalyzed successful messages or skipped the failure");
+        });
+        Test("failed recovery never restores an obsolete UID and retries the recovery window", delegate {
+            var fixture = new IncrementalMailFixture("chat-reset-failure", 42, 6); fixture.Messages(2, 3); fixture.Analyzer.FailSubject = "虚构消息 2";
+            MailFolderSyncSummary failedFolder = fixture.Sync.RunIncremental().Folders.Single();
+            Check(failedFolder.PreviousUid == 42 && failedFolder.FinalUid == 0 && fixture.StateStore.Load().Folders.Single().UidValidity == 7, "Failed recovery kept an obsolete UID");
+            fixture.Analyzer.FailSubject = null; fixture.Sync.RunIncremental();
+            Check(fixture.Factory.Client.Requests.Last().MinimumUid == 0 && fixture.StateStore.Load().Folders.Single().LastUid == 3, "Failed recovery was not retryable");
+        });
+        Test("folder fetch failure reports safe cursor diagnostics and preserves the last successful scan", delegate {
+            var fixture = new IncrementalMailFixture("chat-fetch-failure"); fixture.Factory.Client.FailFolder = "INBOX";
+            MailFolderSyncSummary summary = fixture.Sync.RunIncremental().Folders.Single();
+            Check(summary.PreviousUid == 42 && summary.FinalUid == 42 && summary.RequestedMinimumUid == 43 && summary.FetchedCount == 0, "Failed fetch cursor diagnostics are incorrect");
+            Check(!String.IsNullOrEmpty(summary.Error) && String.IsNullOrEmpty(summary.CompletedAt) && fixture.StateStore.Load().Folders.Single().LastScannedAt == summary.PreviousScannedAt, "Failed fetch changed completion state");
+        });
+        Test("UID incremental search does not exclude delayed mail with old delivery dates", delegate {
+            var request = new MailFetchRequest { MinimumUid = 43, Since = new DateTime(2026, 9, 8) };
+            Check(MailSearchPolicy.CreateQuery(request).Term == MailKit.Search.SearchTerm.Uid, "Incremental query still filters by delivery date");
+            request.MinimumUid = 0;
+            Check(MailSearchPolicy.CreateQuery(request).Term == MailKit.Search.SearchTerm.DeliveredAfter, "Manual and recovery searches lost their date window");
+        });
+        Test("incremental UID exhaustion never falls back to a window rescan", delegate {
+            var fixture = new IncrementalMailFixture("chat-exhausted-cursor", UInt32.MaxValue);
+            MailFolderSyncSummary summary = fixture.Sync.RunIncremental().Folders.Single();
+            Check(fixture.Factory.Client.Requests.Count == 0 && summary.FinalUid == UInt32.MaxValue && summary.FetchedCount == 0, "Exhausted cursor triggered a date-window rescan");
+            Check(!String.IsNullOrEmpty(summary.CompletedAt) && String.IsNullOrEmpty(summary.Error), "Exhausted cursor was not reported as up to date");
+            fixture.Factory.Client.Folders.Single().UidValidity = 8;
+            fixture.Sync.RunIncremental();
+            Check(fixture.Factory.Client.Requests.Single().MinimumUid == 0 && fixture.StateStore.Load().Folders.Single().LastUid == 0, "Exhausted cursor prevented UIDVALIDITY recovery");
+        });
+        Test("strict incremental ignores server range results at or below the committed UID", delegate {
+            var fixture = new IncrementalMailFixture("chat-old-uid-result"); fixture.Messages(42, 43);
+            MailSyncResult result = fixture.Sync.RunIncremental();
+            Check(fixture.Analyzer.Calls == 1 && result.ScannedCount == 1 && result.Folders.Single().FetchedCount == 2, "Strict incremental reanalyzed a UID at or below the cursor");
+            Check(result.Folders.Single().FinalUid == 43, "New UID was not committed");
         });
         Test("one folder failure preserves successful mail work and reports a partial result", delegate {
             string directory = Path.Combine(root, "mail-partial-folder"); var controller = new CalendarController(new CalendarStore(directory)); var stateStore = new MailStateStore(directory);
