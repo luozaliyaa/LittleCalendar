@@ -608,6 +608,10 @@ internal static class CalendarTests
             var settings = new SettingsWindow(controller, delegate { }, secrets, new DeepSeekAgent()); string uiError = null;
             settings.Loaded += delegate {
                 try {
+                    var settingButtons = Descendants(settings).OfType<Button>().ToList();
+                    Check(settingButtons.Any(x => Equals(x.Content, "外观")), "Settings sidebar does not expose the appearance page: " + String.Join("、", settingButtons.Select(x => x.Content)));
+                    Button agentPage = settingButtons.FirstOrDefault(x => Equals(x.Content, "智能整理"));
+                    Check(agentPage != null, "Settings sidebar does not expose the agent page"); agentPage.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); settings.UpdateLayout(); Pump();
                     Check(Find<CheckBox>(settings, x => AutomationProperties.GetName(x) == "启用每日智能整理").IsChecked == false, "Agent enabled state mismatch");
                     Check(Find<TextBox>(settings, x => AutomationProperties.GetName(x) == "每日总结时间").Text == "09:00", "Daily summary time missing");
                     Check(Find<TextBox>(settings, x => AutomationProperties.GetName(x) == "DeepSeek 模型").Text == "deepseek-v4-flash", "Default model missing");
@@ -632,6 +636,7 @@ internal static class CalendarTests
             string uiError = null;
             settings.ContentRendered += delegate {
                 try {
+                    Find<Button>(settings, x => Equals(x.Content, "邮箱同步")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
                     Check(Find<TextBox>(settings, x => AutomationProperties.GetName(x) == "网易邮箱地址") != null, "Mail address field missing");
                     Check(Find<PasswordBox>(settings, x => AutomationProperties.GetName(x) == "网易邮箱授权码").Password == "", "Saved mail authorization code was revealed");
                     Check(Find<CheckBox>(settings, x => AutomationProperties.GetName(x) == "启用网易邮箱每日同步") != null, "Mail sync toggle missing");

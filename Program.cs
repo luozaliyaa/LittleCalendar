@@ -47,8 +47,16 @@ namespace LittleCalendar
             MailSyncState mailState;
             try { mailState = mailStateStore.Load(); } catch { mailState = new MailSyncState(); }
             SetResourceReference(StyleProperty, typeof(Window));
-            Title = "提醒、智能整理与邮箱设置"; Width = 650; Height = 900; MinHeight = 680; ResizeMode = ResizeMode.CanResizeWithGrip; WindowStartupLocation = WindowStartupLocation.CenterOwner; ShowInTaskbar = false;
-            var panel = new StackPanel { Margin = new Thickness(26) };
+            AppearancePalette.Normalize(controller.Data.Appearance); AppearancePalette.CurrentSettings = controller.Data.Appearance.Copy();
+            AppearanceProfile settingsPalette = AppearancePalette.Current;
+            Title = "设置"; Width = 900; Height = 700; MinWidth = 760; MinHeight = 600; ResizeMode = ResizeMode.CanResizeWithGrip; WindowStartupLocation = WindowStartupLocation.CenterOwner; ShowInTaskbar = false;
+            Background = UI.Brush(settingsPalette.Canvas);
+            var reminderPanel = new StackPanel { Margin = new Thickness(2, 0, 12, 0) };
+            var appearancePanel = new StackPanel { Margin = new Thickness(2, 0, 12, 0) };
+            var agentPanel = new StackPanel { Margin = new Thickness(2, 0, 12, 0) };
+            var mailPanel = new StackPanel { Margin = new Thickness(2, 0, 12, 0) };
+            var dataPanel = new StackPanel { Margin = new Thickness(2, 0, 12, 0) };
+            StackPanel panel = reminderPanel;
             var message = UI.Text("", 12, "#7E968A");
             var heading = UI.Text("提前一天，心里有数", 23, "#25483F"); heading.Margin = new Thickness(0, 0, 0, 20); panel.Children.Add(heading);
             var time = new TextBox { Text = controller.Data.ReminderTime, MaxLength = 5 }; panel.Children.Add(UI.Field("普通待办：前一天几点提醒（24 小时制）", time));
@@ -58,6 +66,7 @@ namespace LittleCalendar
             var startup = UI.Option("↗", "随 Windows 登录启动，在托盘等待提醒", "开机启动选项"); startup.IsChecked = originalStartup; panel.Children.Add(startup);
             var help = UI.Text("关闭窗口后仍会提醒。通过托盘菜单退出或关机后，提醒会暂停；再次运行会补发当天及次日未过期的提醒。", 12, "#82958C"); help.Margin = new Thickness(0, 8, 0, 18); panel.Children.Add(help);
             var preview = UI.Button("看看提醒长什么样", testReminder); preview.HorizontalAlignment = HorizontalAlignment.Left; preview.Margin = new Thickness(0, 0, 0, 18); panel.Children.Add(preview);
+            panel = appearancePanel;
             panel.Children.Add(UI.Text("外观", 16, "#355449"));
             AppearanceSettings savedAppearance = (controller.Data.Appearance ?? new AppearanceSettings()).Copy();
             AppearancePalette.Normalize(savedAppearance);
@@ -92,6 +101,7 @@ namespace LittleCalendar
                 theme.SelectedIndex = 0; opacity.Value = 100; backgroundMode.SelectedIndex = 0; pendingBackgroundPath = ""; removeBackground = true; backgroundHint.Text = "保存设置后恢复默认外观。";
             }));
             panel.Children.Add(backgroundActions);
+            panel = agentPanel;
             panel.Children.Add(UI.Text("智能整理 · DeepSeek", 16, "#355449"));
             var agentEnabled = UI.Option("✦", "每天自动整理一次近期待办", "启用每日智能整理"); agentEnabled.IsChecked = controller.Data.Agent.Enabled; panel.Children.Add(agentEnabled);
             var agentTime = new TextBox { Text = controller.Data.Agent.DailyTime, MaxLength = 5 }; panel.Children.Add(UI.Field("每日总结时间", agentTime));
@@ -118,6 +128,7 @@ namespace LittleCalendar
                 try { secrets.Clear(); key.Password = ""; keyHint.Text = "Key 已清除。保存设置后，自动整理仍会保持关闭，直到重新配置。"; message.Text = "已清除本机保存的 DeepSeek API Key。"; }
                 catch (Exception e) { message.Text = "清除失败：" + e.Message; }
             }); keyActions.Children.Add(clearKey); panel.Children.Add(keyActions);
+            panel = mailPanel;
             panel.Children.Add(UI.Text("网易邮箱同步", 16, "#355449"));
             var mailEnabled = UI.Option("✉", "每天读取招聘邮件并自动生成待办", "启用网易邮箱每日同步");
             mailEnabled.IsChecked = mailState.Account.Enabled; panel.Children.Add(mailEnabled);
@@ -221,6 +232,7 @@ namespace LittleCalendar
                 } catch (Exception e) { message.Text = "打开日志目录失败：" + e.Message; }
             }));
             panel.Children.Add(mailActions);
+            panel = dataPanel;
             panel.Children.Add(UI.Text("数据与备份", 16, "#355449"));
             var actions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 10) };
             actions.Children.Add(UI.Button("导出备份", delegate {
@@ -238,7 +250,6 @@ namespace LittleCalendar
             }));
             panel.Children.Add(actions);
             var directory = new TextBox { Text = Path.GetDirectoryName(controller.Store.FilePath), IsReadOnly = true, FontSize = 11, Background = System.Windows.Media.Brushes.Transparent }; panel.Children.Add(directory);
-            message.Margin = new Thickness(0, 10, 0, 16); panel.Children.Add(message);
             var footer = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
             var cancel = UI.Button("取消", delegate { DialogResult = false; }); cancel.IsCancel = true; footer.Children.Add(cancel);
             var save = UI.Button("保存设置", delegate {
@@ -288,7 +299,60 @@ namespace LittleCalendar
                     catch { if (requested != originalStartup) Startup.Set(originalStartup); throw; }
                     DialogResult = true;
                 } catch (Exception e) { message.Text = "保存失败：" + e.Message; }
-            }, true); save.IsDefault = true; footer.Children.Add(save); panel.Children.Add(footer); Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            }, true); save.IsDefault = true; footer.Children.Add(save);
+
+            var contentScroll = new ScrollViewer { Content = reminderPanel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 0, 0, 8) };
+            var right = new Grid { Margin = new Thickness(26, 24, 18, 20) };
+            right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            right.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            right.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            right.Children.Add(contentScroll);
+            message.Margin = new Thickness(2, 4, 0, 12); Grid.SetRow(message, 1); right.Children.Add(message);
+            Grid.SetRow(footer, 2); right.Children.Add(footer);
+
+            var navigation = new StackPanel { Margin = new Thickness(14, 22, 12, 18) };
+            var navTitle = UI.Text("设置", 19, settingsPalette.Accent); navTitle.Margin = new Thickness(10, 0, 0, 4); navigation.Children.Add(navTitle);
+            var navHint = UI.Text("提醒、外观与同步", 11, settingsPalette.TabText); navHint.Margin = new Thickness(10, 0, 0, 20); navigation.Children.Add(navHint);
+            var navButtons = new List<Button>();
+            StackPanel[] pages = { reminderPanel, appearancePanel, agentPanel, mailPanel, dataPanel };
+            string[] pageNames = { "提醒", "外观", "智能整理", "邮箱同步", "数据与备份" };
+            int selectedPage = 0;
+            Action<int> showPage = null;
+            showPage = delegate(int index) {
+                selectedPage = index; contentScroll.Content = pages[index];
+                for (int i = 0; i < navButtons.Count; i++) {
+                    bool selected = i == selectedPage;
+                    navButtons[i].Background = UI.Brush(selected ? settingsPalette.SelectedDay : "Transparent");
+                    navButtons[i].Foreground = UI.Brush(selected ? settingsPalette.Accent : settingsPalette.TabText);
+                    navButtons[i].FontWeight = selected ? FontWeights.SemiBold : FontWeights.Normal;
+                }
+            };
+            for (int i = 0; i < pageNames.Length; i++) {
+                int captured = i; var button = UI.Button(pageNames[i], delegate { showPage(captured); });
+                button.Margin = new Thickness(0, 0, 0, 4); button.Padding = new Thickness(12, 10, 12, 10); button.HorizontalContentAlignment = HorizontalAlignment.Left;
+                navigation.Children.Add(button); navButtons.Add(button);
+            }
+            showPage(0);
+            var left = new Border { Width = 156, Background = UI.Brush(settingsPalette.AgentBackground), BorderBrush = UI.Brush(settingsPalette.AgentBorder), BorderThickness = new Thickness(0, 0, 1, 0), Child = navigation };
+            var root = new Grid(); root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(156) }); root.ColumnDefinitions.Add(new ColumnDefinition());
+            root.Children.Add(left); Grid.SetColumn(right, 1); root.Children.Add(right); Content = root;
+            Loaded += delegate { ApplyThemeToVisibleControls(this, settingsPalette); };
+        }
+        private static void ApplyThemeToVisibleControls(DependencyObject root, AppearanceProfile palette)
+        {
+            if (root == null) return;
+            for (int i = 0; i < System.Windows.Media.VisualTreeHelper.GetChildrenCount(root); i++) {
+                DependencyObject child = System.Windows.Media.VisualTreeHelper.GetChild(root, i);
+                var textBox = child as TextBox;
+                if (textBox != null) { textBox.BorderBrush = UI.Brush(palette.SelectedBorder); textBox.Background = System.Windows.Media.Brushes.White; }
+                var password = child as PasswordBox;
+                if (password != null) { password.BorderBrush = UI.Brush(palette.SelectedBorder); password.Background = System.Windows.Media.Brushes.White; }
+                var combo = child as ComboBox;
+                if (combo != null) { combo.BorderBrush = UI.Brush(palette.SelectedBorder); combo.Background = UI.Brush(palette.TabBackground); }
+                var check = child as CheckBox;
+                if (check != null) { check.BorderBrush = UI.Brush(palette.SelectedBorder); check.Background = UI.Brush(palette.AgentBackground); check.Foreground = UI.Brush(palette.AccentText); }
+                ApplyThemeToVisibleControls(child, palette);
+            }
         }
     }
 
