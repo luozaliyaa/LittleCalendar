@@ -105,7 +105,7 @@ namespace LittleCalendar
         private readonly TextBlock agentStatus = UI.Text("", 11, "#82958C");
         private readonly Button agentRefresh = UI.Button("立即总结", delegate { });
         private readonly Button agentMore = UI.Button("查看完整结果", delegate { });
-        private readonly Button opportunityButton = UI.Button("机会通知", delegate { });
+        private readonly Button opportunityButton = UI.Button("◉ 机会通知", delegate { });
         private TextBlock brandTitle;
         private TextBlock brandSubtitle;
         private TextBlock agentHeading;
@@ -158,10 +158,10 @@ namespace LittleCalendar
             AutomationProperties.SetName(search, "搜索所有待办"); AutomationProperties.SetName(searchShell, "搜索待办框"); actions.Children.Add(searchShell);
             opportunityButton.Click += delegate { new OpportunityWindow(controller) { Owner = this }.ShowDialog(); };
             actions.Children.Add(opportunityButton);
-            mailSyncButton = UI.Button("同步邮件", delegate { if (MailSyncRequested != null) MailSyncRequested(); });
+            mailSyncButton = UI.Button("↻ 同步邮件", delegate { if (MailSyncRequested != null) MailSyncRequested(); });
             mailSyncButton.ToolTip = "从上次成功同步的位置继续读取；首次同步最近 7 天邮件。";
             AutomationProperties.SetName(mailSyncButton, "从上次同步位置继续同步邮件"); actions.Children.Add(mailSyncButton);
-            actions.Children.Add(UI.Button("提醒设置", delegate { if (SettingsRequested != null) SettingsRequested(); }));
+            actions.Children.Add(UI.Button("⚙ 设置", delegate { if (SettingsRequested != null) SettingsRequested(); }));
             newTodoButton = UI.Button("＋ 新建待办", delegate { Edit(null); }, true); actions.Children.Add(newTodoButton);
             Grid.SetColumn(actions, 1); header.Children.Add(actions); root.Children.Add(header);
 
@@ -277,7 +277,7 @@ namespace LittleCalendar
         }
         public void SetMailSyncBusy(bool busy, string message)
         {
-            mailSyncButton.IsEnabled = !busy; mailSyncButton.Content = busy ? "同步中…" : "同步邮件";
+            mailSyncButton.IsEnabled = !busy; mailSyncButton.Content = busy ? "↻ 同步中…" : "↻ 同步邮件";
             if (!String.IsNullOrWhiteSpace(message)) mailSyncSummary.Text = message;
         }
         public void SelectDate(DateTime date)
@@ -296,7 +296,7 @@ namespace LittleCalendar
             RefreshAgent();
             RefreshMailSyncStatus();
             int unreadNotices = controller.Data.Notices.Count(x => !x.Read);
-            opportunityButton.Content = unreadNotices > 0 ? "机会通知 " + unreadNotices : "机会通知";
+            opportunityButton.Content = unreadNotices > 0 ? "◉ 机会通知 " + unreadNotices : "◉ 机会通知";
             monthTitle.Text = VisibleMonth.ToString("yyyy 年 M 月");
             int pending = controller.Data.Items.Count(x => !x.Deleted && !x.Completed && Enumerable.Range(0, DateTime.DaysInMonth(VisibleMonth.Year, VisibleMonth.Month)).Any(day => Deadlines.OnDay(x, VisibleMonth.AddDays(day), clock().Date)));
             monthSummary.Text = pending == 0 ? "这个月，可以从一件小事开始" : "本月还有 " + pending + " 项待办";

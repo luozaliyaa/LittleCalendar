@@ -601,7 +601,7 @@ internal static class CalendarTests
             var order = new List<string>(); var mail = new FakeDailyMailSync(order);
             using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0), new OrderedAgent(order), mail)) {
                 runtime.ShowMain(); Pump();
-                Find<Button>(runtime.Window, x => Equals(x.Content, "同步邮件")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Find<Button>(runtime.Window, x => Equals(x.Content, "↻ 同步邮件")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 WaitUntil(delegate { return mail.Runs == 1; });
                 Check(mail.Runs == 1, "Manual mail sync action did not start the existing incremental sync workflow");
             }
@@ -636,6 +636,15 @@ internal static class CalendarTests
                 DependencyObject parent = VisualTreeHelper.GetParent(input); Border shell = parent == null ? null : VisualTreeHelper.GetParent(parent) as Border;
                 Check(shell != null && shell.CornerRadius.TopLeft >= 9, "Search label and input are still visually separate");
                 Check(shell.ActualHeight >= 38 && shell.ActualHeight <= 44 && shell.ActualWidth >= 200 && shell.ActualWidth <= 240, "Search control is not proportioned with header buttons");
+            }
+        });
+        Test("header actions use compact icons and settings wording", delegate {
+            var controller = new CalendarController(Store("header-action-icons"));
+            using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0))) {
+                runtime.ShowMain(); Pump();
+                var labels = Descendants(runtime.Window).OfType<Button>().Select(x => x.Content as string).Where(x => x != null).ToList();
+                Check(labels.Contains("◉ 机会通知") && labels.Contains("↻ 同步邮件") && labels.Contains("⚙ 设置") && labels.Contains("＋ 新建待办"), "Header action labels do not use the compact icon set");
+                Check(!labels.Contains("提醒设置"), "Header still exposes the old reminder settings label");
             }
         });
         Test("month calendar fits six weeks without its own vertical scrollbar", delegate {
