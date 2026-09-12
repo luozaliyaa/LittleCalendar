@@ -1983,6 +1983,29 @@ internal static class CalendarTests
             };
             reopened.ShowDialog(); Check(uiError == null, "Reopen failed: " + uiError);
         });
+        Test("absolute mail deadline reopens as an explicit cutoff and saves the edited cutoff", delegate {
+            var original = new DeadlineSpec {
+                StartAt = "2026-09-12T10:00:00+08:00", Amount = 1, Unit = "absolute", Confirmed = true,
+                ManualEndAt = "2026-09-12T12:00:00+08:00", OriginalText = "（北京时间）2026-09-12 10:00--12:00"
+            };
+            var fields = new DeadlineFields(original, new DateTime(2026, 9, 12));
+            var window = new Window { Content = fields, Width = 620, Height = 680 }; string uiError = null;
+            window.Loaded += delegate {
+                try {
+                    ComboBox unit = Find<ComboBox>(window, x => AutomationProperties.GetName(x) == "期限单位");
+                    DatePicker endDate = Find<DatePicker>(window, x => AutomationProperties.GetName(x) == "人工核实的截止日期");
+                    TextBox endTime = Find<TextBox>(window, x => AutomationProperties.GetName(x) == "人工核实的截止时间");
+                    Check(unit.SelectedIndex == 3 && (unit.SelectedItem as string).Contains("明确截止"), "Absolute cutoff was mislabeled as a working-day deadline");
+                    Check(endDate.SelectedDate == new DateTime(2026, 9, 12) && endTime.Text == "12:00", "Saved absolute cutoff was not restored into the editor");
+                    endDate.SelectedDate = new DateTime(2026, 9, 19); endTime.Text = "12:00";
+                    Find<CheckBox>(window, x => AutomationProperties.GetName(x) == "已核实截止时间").IsChecked = true;
+                    DeadlineSpec edited = fields.Read();
+                    Check(edited.Unit == "absolute" && Deadlines.End(edited).LocalDateTime == new DateTime(2026, 9, 19, 12, 0, 0), "Edited absolute cutoff was not saved as the new calendar deadline");
+                    window.Close();
+                } catch (Exception error) { uiError = error.ToString(); window.Close(); }
+            };
+            window.ShowDialog(); Check(uiError == null, "Absolute deadline editor failed: " + uiError);
+        });
         Test("calendar displays active deadline on intermediate days and reminder says cutoff", delegate {
             var controller = new CalendarController(Store("deadline-calendar"));
             var task = DeadlineTask(DateTimeOffset.Now.AddDays(-1).ToString("o"), 72); controller.SaveTodo(task);
