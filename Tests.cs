@@ -592,7 +592,8 @@ internal static class CalendarTests
         Test("main calendar uses compact outer and inter-panel spacing", delegate {
             var controller = new CalendarController(Store("compact-gutters"));
             using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0))) {
-                runtime.ShowMain(); Pump(); Grid rootPanel = (Grid)runtime.Window.Content;
+                runtime.ShowMain(); Pump(); Grid host = (Grid)runtime.Window.Content;
+                Grid rootPanel = host.Children.OfType<Grid>().First(x => x.Margin.Left > 0);
                 Grid columns = rootPanel.Children.OfType<Grid>().First(x => Grid.GetRow(x) == 1);
                 Border calendarCard = columns.Children.OfType<Border>().First(x => Grid.GetColumn(x) == 0);
                 Border sideCard = columns.Children.OfType<Border>().First(x => Grid.GetColumn(x) == 1);
@@ -1274,6 +1275,17 @@ internal static class CalendarTests
                 runtime.Window.Close(); Check(!runtime.Window.IsVisible, "Close did not hide to tray");
                 runtime.ShowMain(); Check(runtime.Window.IsVisible, "Cannot reopen from tray");
             }
+        });
+        Test("today list excludes an overdue deadline after its active date range", delegate {
+            DateTime now = new DateTime(2026, 9, 12, 9, 0, 0);
+            var controller = new CalendarController(Store("today-list-deadline-range"));
+            controller.SaveTodo(DeadlineTask("2026-09-10T10:00:00+08:00", 24, "hours"));
+            var window = new CalendarWindow(controller, () => now);
+            try {
+                window.Show(); window.SelectDate(now.Date); Pump();
+                Check(!Descendants(window).OfType<Border>().Any(x => (AutomationProperties.GetName(x) ?? "") == "待办卡片 完成笔试"),
+                    "Overdue deadline remained in the today list after its active range ended");
+            } finally { window.Close(); }
         });
         app.Shutdown();
         results.Add(passed + " passed; " + failed + " failed");

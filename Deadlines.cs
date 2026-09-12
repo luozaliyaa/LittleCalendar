@@ -60,6 +60,14 @@ namespace LittleCalendar
             return (day.Date >= start && day.Date <= end) || (day.Date == today.Date && end < today.Date);
         }
 
+        public static bool AppearsInTaskListOnDay(Todo item, DateTime day)
+        {
+            if (item == null || item.Deadline == null) return item != null && item.Date == Dates.Key(day);
+            DateTime start = ParseInstant(item.Deadline.StartAt).LocalDateTime.Date;
+            DateTime end = End(item.Deadline).LocalDateTime.Date;
+            return day.Date >= start && day.Date <= end;
+        }
+
         public static string Status(Todo item, DateTime now)
         {
             if (item.Completed) return "已完成";

@@ -47,7 +47,8 @@ namespace LittleCalendar
         public List<Todo> Items { get; set; }
         public List<OpportunityNotice> Notices { get; set; }
         public AgentSettings Agent { get; set; }
-        public CalendarData() { Version = 3; ReminderTime = "19:00"; Sound = true; Items = new List<Todo>(); Notices = new List<OpportunityNotice>(); Agent = new AgentSettings(); }
+        public AppearanceSettings Appearance { get; set; }
+        public CalendarData() { Version = 3; ReminderTime = "19:00"; Sound = true; Items = new List<Todo>(); Notices = new List<OpportunityNotice>(); Agent = new AgentSettings(); Appearance = new AppearanceSettings(); }
     }
 
     public static class Dates
@@ -230,6 +231,8 @@ namespace LittleCalendar
             data.Version = 3;
             if (data.Agent == null) data.Agent = new AgentSettings();
             if (data.Notices == null) data.Notices = new List<OpportunityNotice>();
+            if (data.Appearance == null) data.Appearance = new AppearanceSettings();
+            AppearancePalette.Normalize(data.Appearance);
             data.Agent.DailyTime = String.IsNullOrWhiteSpace(data.Agent.DailyTime) ? "09:00" : data.Agent.DailyTime;
             data.Agent.Model = String.IsNullOrWhiteSpace(data.Agent.Model) ? "deepseek-v4-flash" : data.Agent.Model.Trim();
             data.Agent.LastAutomaticDate = data.Agent.LastAutomaticDate ?? ""; data.Agent.LastSummaryAt = data.Agent.LastSummaryAt ?? "";

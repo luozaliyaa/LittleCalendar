@@ -34,7 +34,7 @@ $packageDlls = Get-ChildItem -LiteralPath $packageRoot -Recurse -Filter '*.dll' 
     }} | Select-Object -First 1
   }
 $packageReferences = $packageDlls | ForEach-Object { '/reference:' + $_.FullName }
-$sourceFiles = @('MailModels.cs', 'MailStore.cs', 'MailDiagnostics.cs', 'MailClient.cs', 'MailAnalysis.cs', 'MailSync.cs', 'Model.cs', 'Deadlines.cs', 'CalendarVisuals.cs', 'DeadlineFields.cs', 'Agent.cs', 'Desktop.cs', 'Program.cs') | ForEach-Object { Join-Path $calendarRoot $_ }
+$sourceFiles = @('MailModels.cs', 'MailStore.cs', 'MailDiagnostics.cs', 'MailClient.cs', 'MailAnalysis.cs', 'MailSync.cs', 'Model.cs', 'Deadlines.cs', 'CalendarVisuals.cs', 'Appearance.cs', 'DeadlineFields.cs', 'Agent.cs', 'Desktop.cs', 'Program.cs') | ForEach-Object { Join-Path $calendarRoot $_ }
 & $compilerPath /nologo /utf8output /target:winexe /optimize+ /platform:anycpu ('/out:' + (Join-Path $outputPath 'LittleCalendar.exe')) ('/win32manifest:' + (Join-Path $calendarRoot 'app.manifest')) ('/resource:' + (Join-Path $calendarRoot 'Theme.xaml') + ',Theme.xaml') @references @packageReferences @sourceFiles
 if ($LASTEXITCODE -ne 0) { throw '日历程序构建失败。' }
 $packageDlls | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $outputPath $_.Name) -Force }

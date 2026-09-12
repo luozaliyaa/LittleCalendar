@@ -99,14 +99,14 @@ namespace LittleCalendar
 
     public static class CalendarPalette
     {
-        private static readonly string[] NormalDeadlineColors = { "#DCEAF7", "#E9E0F5", "#F7E4D8", "#DCEFE6", "#F4E1EC" };
         public static string NormalDeadline(Todo item)
         {
             string key = (item == null ? "" : item.Id) ?? "";
             if (key.Length == 0) key = item == null ? "" : item.Title ?? "";
             long hash = 0;
             foreach (char character in key) hash = ((hash * 31) + character) & 0x7fffffff;
-            return NormalDeadlineColors[(int)(hash % NormalDeadlineColors.Length)];
+            string[] colors = AppearancePalette.Current.Bubbles;
+            return colors[(int)(hash % colors.Length)];
         }
     }
 }

@@ -10,6 +10,8 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 
@@ -47,7 +49,7 @@ namespace LittleCalendar
         public static Button Button(string text, Action action, bool primary = false)
         {
             var button = new Button { Content = text, Margin = new Thickness(4, 0, 0, 0) };
-            if (primary) button.SetResourceReference(FrameworkElement.StyleProperty, "Primary");
+            if (primary) { button.SetResourceReference(FrameworkElement.StyleProperty, "Primary"); button.Background = Brush(AppearancePalette.Current.Accent); }
             button.Click += delegate { action(); };
             return button;
         }
@@ -95,6 +97,7 @@ namespace LittleCalendar
         private readonly TextBlock monthSummary = UI.Text("", 12, "#7B908B");
         private readonly TextBlock dayTitle = UI.Text("", 22, "#243E42");
         private readonly TextBlock daySummary = UI.Text("", 12, "#7B908B");
+        private readonly TextBlock mailSyncSummary = UI.Text("", 11, "#82958C");
         private readonly TextBlock status = UI.Text("", 12, "#6D8880");
         private readonly StackPanel taskList = new StackPanel();
         private readonly TextBlock agentOverview = UI.Text("", 13, "#355449");
@@ -103,8 +106,21 @@ namespace LittleCalendar
         private readonly Button agentRefresh = UI.Button("立即总结", delegate { });
         private readonly Button agentMore = UI.Button("查看完整结果", delegate { });
         private readonly Button opportunityButton = UI.Button("机会通知", delegate { });
+        private TextBlock brandTitle;
+        private TextBlock brandSubtitle;
+        private TextBlock agentHeading;
+        private Button newTodoButton;
+        private Button addTodoButton;
         private readonly TextBox search = new TextBox { Width = 184, Height = 38, MinHeight = 0, ToolTip = "搜索所有日期的标题和备注", Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(7, 5, 4, 5) };
         private readonly Button[] modes = new Button[3];
+        private readonly MailStateStore mailStateStore;
+        private readonly Grid backgroundLayer = new Grid { IsHitTestVisible = false, ClipToBounds = true };
+        private readonly Image backgroundImage = new Image { Stretch = Stretch.UniformToFill, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Effect = new BlurEffect { Radius = 2 } };
+        private readonly Border backgroundOverlay = new Border();
+        private Border agentCard;
+        private Border calendarCard;
+        private Border sideCard;
+        private string appliedBackgroundFile = "";
         private int mode;
         public DateTime SelectedDate { get; private set; }
         public DateTime VisibleMonth { get; private set; }
@@ -115,6 +131,7 @@ namespace LittleCalendar
             SetResourceReference(StyleProperty, typeof(Window));
             this.controller = controller;
             this.clock = clock ?? (() => DateTime.Now);
+            mailStateStore = new MailStateStore(System.IO.Path.GetDirectoryName(controller.Store.FilePath));
             Title = "小日历 · 待办与提醒"; Width = 1160; Height = 920; MinWidth = 940; MinHeight = 800;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             for (int i = 0; i < 7; i++) days.ColumnDefinitions.Add(new ColumnDefinition());
@@ -128,7 +145,8 @@ namespace LittleCalendar
 
             var header = new Grid { Margin = new Thickness(0, 0, 0, 18) };
             header.ColumnDefinitions.Add(new ColumnDefinition()); header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var branding = UI.Stack(UI.Text("小日历", 29, "#197B68"), UI.Text("给今天一点条理，为明天留个提醒。", 12, "#78918A"));
+            brandTitle = UI.Text("小日历", 29, AppearancePalette.Current.Accent); brandSubtitle = UI.Text("给今天一点条理，为明天留个提醒。", 12, "#78918A");
+            var branding = UI.Stack(brandTitle, brandSubtitle);
             header.Children.Add(branding);
             var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             var searchContent = new DockPanel(); var searchMark = UI.Text("⌕", 17, "#78918A"); searchMark.Width = 22; searchMark.HorizontalAlignment = HorizontalAlignment.Center; DockPanel.SetDock(searchMark, Dock.Left); searchContent.Children.Add(searchMark); searchContent.Children.Add(search);
@@ -137,7 +155,7 @@ namespace LittleCalendar
             opportunityButton.Click += delegate { new OpportunityWindow(controller) { Owner = this }.ShowDialog(); };
             actions.Children.Add(opportunityButton);
             actions.Children.Add(UI.Button("提醒设置", delegate { if (SettingsRequested != null) SettingsRequested(); }));
-            actions.Children.Add(UI.Button("＋ 新建待办", delegate { Edit(null); }, true));
+            newTodoButton = UI.Button("＋ 新建待办", delegate { Edit(null); }, true); actions.Children.Add(newTodoButton);
             Grid.SetColumn(actions, 1); header.Children.Add(actions); root.Children.Add(header);
 
             var columns = new Grid(); columns.ColumnDefinitions.Add(new ColumnDefinition()); columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(350) });
@@ -152,20 +170,21 @@ namespace LittleCalendar
             foreach (string name in new[] { "一", "二", "三", "四", "五", "六", "日" }) { TextBlock label = UI.Text(name, 12, "#879990"); label.HorizontalAlignment = HorizontalAlignment.Center; weekdays.Children.Add(label); }
             Grid.SetRow(weekdays, 1); calendar.Children.Add(weekdays);
             Grid.SetRow(days, 2); calendar.Children.Add(days);
-            Border calendarCard = UI.Card(calendar, 14); calendarCard.Margin = new Thickness(0, 0, 14, 0); columns.Children.Add(calendarCard);
+            calendarCard = UI.Card(calendar, 14); calendarCard.Margin = new Thickness(0, 0, 14, 0); columns.Children.Add(calendarCard);
 
             var side = new Grid(); side.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); side.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); side.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); side.RowDefinitions.Add(new RowDefinition()); side.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            side.Children.Add(UI.Stack(dayTitle, daySummary));
-            Border agentCard = BuildAgentCard(); Grid.SetRow(agentCard, 1); side.Children.Add(agentCard);
+            var dayHeading = UI.Stack(dayTitle, daySummary, mailSyncSummary); mailSyncSummary.Margin = new Thickness(0, 3, 0, 0); side.Children.Add(dayHeading);
+            agentCard = BuildAgentCard(); Grid.SetRow(agentCard, 1); side.Children.Add(agentCard);
             var tabs = new UniformGrid { Rows = 1, Columns = 3, Margin = new Thickness(0, 14, 0, 16) };
             for (int i = 0; i < 3; i++) { int captured = i; modes[i] = UI.Button(new[] { "当日", "全部", "回收站" }[i], delegate { mode = captured; RefreshTasks(); }); modes[i].Padding = new Thickness(8); tabs.Children.Add(modes[i]); }
             Grid.SetRow(tabs, 2); side.Children.Add(tabs);
             var scroll = new ScrollViewer { Content = taskList }; Grid.SetRow(scroll, 3); side.Children.Add(scroll);
-            var add = UI.Button("＋ 为这一天添加待办", delegate { Edit(null); }, true); add.Margin = new Thickness(0, 14, 0, 0); Grid.SetRow(add, 4); side.Children.Add(add);
-            Border sideCard = UI.Card(side, 16); Grid.SetColumn(sideCard, 1); columns.Children.Add(sideCard);
+            addTodoButton = UI.Button("＋ 为这一天添加待办", delegate { Edit(null); }, true); addTodoButton.Margin = new Thickness(0, 14, 0, 0); Grid.SetRow(addTodoButton, 4); side.Children.Add(addTodoButton);
+            sideCard = UI.Card(side, 16); Grid.SetColumn(sideCard, 1); columns.Children.Add(sideCard);
 
             status.Margin = new Thickness(2, 10, 0, 0); Grid.SetRow(status, 2); root.Children.Add(status);
-            Content = root;
+            backgroundLayer.Children.Add(backgroundImage); backgroundLayer.Children.Add(backgroundOverlay);
+            var host = new Grid(); host.Children.Add(backgroundLayer); host.Children.Add(root); Content = host;
             search.TextChanged += delegate { RefreshTasks(); };
             controller.Changed += delegate {
                 if (Dispatcher.CheckAccess()) Refresh();
@@ -181,7 +200,7 @@ namespace LittleCalendar
         {
             var content = new StackPanel();
             var heading = new Grid(); heading.ColumnDefinitions.Add(new ColumnDefinition()); heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            heading.Children.Add(UI.Text("✦ 智能整理", 15, "#197B68"));
+            agentHeading = UI.Text("✦ 智能整理", 15, AppearancePalette.Current.Accent); heading.Children.Add(agentHeading);
             agentRefresh.Padding = new Thickness(10, 5, 10, 5); agentRefresh.Click += delegate { if (AgentSummaryRequested != null) AgentSummaryRequested(); };
             Grid.SetColumn(agentRefresh, 1); heading.Children.Add(agentRefresh); content.Children.Add(heading);
             agentOverview.TextWrapping = TextWrapping.Wrap; agentOverview.Margin = new Thickness(0, 10, 0, 5); content.Children.Add(agentOverview);
@@ -207,6 +226,35 @@ namespace LittleCalendar
                 agentMore.Visibility = Visibility.Visible;
             }
         }
+        private void RefreshMailSyncStatus()
+        {
+            try {
+                MailSyncState state = mailStateStore.Load(); DateTimeOffset completed;
+                mailSyncSummary.Text = DateTimeOffset.TryParse(state.LastCompletedAt, out completed)
+                    ? "最近同步邮件待办：" + completed.LocalDateTime.ToString("M月d日 HH:mm")
+                    : "邮件待办尚未同步";
+            } catch { mailSyncSummary.Text = "邮件同步状态暂不可用"; }
+        }
+        private void ApplyAppearance()
+        {
+            AppearanceSettings settings = controller.Data.Appearance ?? new AppearanceSettings();
+            AppearancePalette.Normalize(settings); AppearancePalette.CurrentSettings = settings.Copy();
+            AppearanceProfile palette = AppearancePalette.Current;
+            Background = UI.Brush(palette.Canvas);
+            monthTitle.Foreground = UI.Brush("#243E42"); dayTitle.Foreground = UI.Brush("#243E42");
+            brandTitle.Foreground = UI.Brush(palette.Accent); brandSubtitle.Foreground = UI.Brush(palette.TabText); agentHeading.Foreground = UI.Brush(palette.Accent);
+            newTodoButton.Background = UI.Brush(palette.Accent); addTodoButton.Background = UI.Brush(palette.Accent); agentRefresh.Background = UI.Brush(palette.SelectedDay);
+            agentCard.Background = UI.Brush(palette.AgentBackground); agentCard.BorderBrush = UI.Brush(palette.AgentBorder);
+            string cardSurface = String.IsNullOrWhiteSpace(settings.BackgroundFile) ? "#FFFFFF" : "#ECFFFFFF";
+            calendarCard.Background = UI.Brush(cardSurface); sideCard.Background = UI.Brush(cardSurface);
+            backgroundOverlay.Background = UI.Brush(palette.Canvas); backgroundOverlay.Opacity = String.IsNullOrWhiteSpace(settings.BackgroundFile) ? 1 : 0.42;
+            backgroundImage.Opacity = settings.BackgroundOpacity / 100.0;
+            backgroundImage.Stretch = settings.BackgroundMode == "contain" ? Stretch.Uniform : Stretch.UniformToFill;
+            if (!String.Equals(appliedBackgroundFile, settings.BackgroundFile, StringComparison.Ordinal)) {
+                appliedBackgroundFile = settings.BackgroundFile;
+                backgroundImage.Source = AppearanceFiles.Load(System.IO.Path.GetDirectoryName(controller.Store.FilePath), settings.BackgroundFile);
+            }
+        }
         public void SetAgentBusy(bool busy, string message)
         {
             agentRefresh.IsEnabled = !busy; agentRefresh.Content = busy ? "整理中…" : "立即总结";
@@ -224,7 +272,9 @@ namespace LittleCalendar
         }
         public void Refresh()
         {
+            ApplyAppearance();
             RefreshAgent();
+            RefreshMailSyncStatus();
             int unreadNotices = controller.Data.Notices.Count(x => !x.Read);
             opportunityButton.Content = unreadNotices > 0 ? "机会通知 " + unreadNotices : "机会通知";
             monthTitle.Text = VisibleMonth.ToString("yyyy 年 M 月");
@@ -237,9 +287,10 @@ namespace LittleCalendar
             for (int i = 0; i < 42; i++) {
                 DateTime date = start.AddDays(i); bool selected = date == SelectedDate; bool today = date == clock().Date;
                 var cell = new Grid(); cell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); cell.RowDefinitions.Add(new RowDefinition());
-                var day = UI.Text(date.Day.ToString(), 15, date.Month != VisibleMonth.Month ? "#B4C0BA" : today ? "#197B68" : "#3B5752");
+                AppearanceProfile palette = AppearancePalette.Current;
+                var day = UI.Text(date.Day.ToString(), 15, date.Month != VisibleMonth.Month ? "#B4C0BA" : today ? palette.Accent : "#3B5752");
                 day.FontWeight = today || selected ? FontWeights.Bold : FontWeights.Normal;
-                var dateLine = new DockPanel(); if (today) { var mark = UI.Text("今", 10, "#197B68"); mark.HorizontalAlignment = HorizontalAlignment.Right; DockPanel.SetDock(mark, Dock.Right); dateLine.Children.Add(mark); } dateLine.Children.Add(day); cell.Children.Add(dateLine);
+                var dateLine = new DockPanel(); if (today) { var mark = UI.Text("今", 10, palette.Accent); mark.HorizontalAlignment = HorizontalAlignment.Right; DockPanel.SetDock(mark, Dock.Right); dateLine.Children.Add(mark); } dateLine.Children.Add(day); cell.Children.Add(dateLine);
                 List<Todo> items = controller.Data.Items.Where(x => !x.Deleted && Deadlines.OnDay(x, date, clock().Date)).ToList();
                 int week = i / 7, column = i % 7;
                 int highestLane = visualLayout.Segments.Where(x => x.Week == week && x.StartColumn <= column && x.EndColumn >= column).Select(x => x.Lane).DefaultIfEmpty(-1).Max();
@@ -251,7 +302,7 @@ namespace LittleCalendar
                     preview.TextWrapping = TextWrapping.NoWrap; preview.TextTrimming = TextTrimming.CharacterEllipsis;
                     var bubble = new Border { Child = preview, CornerRadius = new CornerRadius(6), Padding = new Thickness(5, 1, 5, 1),
                         Margin = new Thickness(0, highestLane < 0 ? 15 : 64, 0, 0), Height = 17, VerticalAlignment = VerticalAlignment.Top,
-                        Background = UI.Brush(todo.Completed ? "#E5EAE8" : todo.Important ? "#F5E7CC" : "#DCEFE8"), ToolTip = String.Join("\n", fixedItems.Select(x => x.Title)) };
+                        Background = UI.Brush(todo.Completed ? "#E5EAE8" : todo.Important ? "#F5E7CC" : CalendarPalette.NormalDeadline(todo)), ToolTip = String.Join("\n", fixedItems.Select(x => x.Title)) };
                     System.Windows.Automation.AutomationProperties.SetName(bubble, "待办气泡 " + todo.Title);
                     Grid.SetRowSpan(bubble, 2);
                     if (highestLane >= 1) { bubble.Width = 10; bubble.Height = 10; bubble.Padding = new Thickness(0); bubble.Margin = new Thickness(0, 1, 18, 0); bubble.HorizontalAlignment = HorizontalAlignment.Right; bubble.Child = null; }
@@ -268,8 +319,8 @@ namespace LittleCalendar
                 }
                 var button = UI.Button("", delegate { SelectDate(date); }); button.Content = cell; button.Margin = new Thickness(2); button.Padding = new Thickness(7, 2, 7, 7);
                 button.HorizontalContentAlignment = HorizontalAlignment.Stretch; button.VerticalContentAlignment = VerticalAlignment.Stretch;
-                button.Background = UI.Brush(selected ? "#E2F2EC" : date.Month == VisibleMonth.Month ? "#F8FAF9" : "#FCFDFD");
-                button.BorderBrush = UI.Brush(today ? "#75BCA6" : selected ? "#B0DAC9" : "#F0F4F2"); button.BorderThickness = new Thickness(1);
+                button.Background = UI.Brush(selected ? palette.SelectedDay : date.Month == VisibleMonth.Month ? "#F8FAF9" : "#FCFDFD");
+                button.BorderBrush = UI.Brush(today ? palette.SelectedBorder : selected ? palette.SelectedBorder : "#F0F4F2"); button.BorderThickness = new Thickness(1);
                 button.ToolTip = date.ToString("yyyy年M月d日 dddd", CultureInfo.GetCultureInfo("zh-CN"));
                 System.Windows.Automation.AutomationProperties.SetName(button, date.ToString("yyyy年M月d日"));
                 Grid.SetRow(button, i / 7); Grid.SetColumn(button, i % 7); days.Children.Add(button);
@@ -331,10 +382,15 @@ namespace LittleCalendar
             if (modes[0] == null) return;
             bool searching = !String.IsNullOrWhiteSpace(search.Text);
             dayTitle.Text = mode == 2 ? "回收站" : searching ? "搜索结果" : mode == 1 ? "全部待办" : SelectedDate.ToString("M月d日 dddd", CultureInfo.GetCultureInfo("zh-CN"));
-            for (int i = 0; i < modes.Length; i++) { modes[i].Background = UI.Brush(i == mode ? "#E2F2EC" : "#F4F7F5"); modes[i].Foreground = UI.Brush(i == mode ? "#197B68" : "#789088"); }
+            int todayCount = controller.Data.Items.Count(x => !x.Deleted && Deadlines.AppearsInTaskListOnDay(x, SelectedDate));
+            int allCount = controller.Data.Items.Count(x => !x.Deleted);
+            int recycleCount = controller.Data.Items.Count(x => x.Deleted);
+            string[] labels = { "当日（" + todayCount + "）", "全部（" + allCount + "）", "回收站（" + recycleCount + "）" };
+            AppearanceProfile palette = AppearancePalette.Current;
+            for (int i = 0; i < modes.Length; i++) { modes[i].Content = labels[i]; modes[i].Background = UI.Brush(i == mode ? palette.SelectedDay : palette.TabBackground); modes[i].Foreground = UI.Brush(i == mode ? palette.Accent : palette.TabText); }
             IEnumerable<Todo> selected = controller.Data.Items.Where(x => x.Deleted == (mode == 2));
             if (searching) selected = selected.Where(x => (x.Title + " " + x.Notes + " " + (x.Deadline == null ? "" : x.Deadline.OriginalText)).IndexOf(search.Text.Trim(), StringComparison.OrdinalIgnoreCase) >= 0);
-            else if (mode == 0) selected = selected.Where(x => Deadlines.OnDay(x, SelectedDate, clock().Date));
+            else if (mode == 0) selected = selected.Where(x => Deadlines.AppearsInTaskListOnDay(x, SelectedDate));
             var items = selected.OrderBy(x => x.Completed).ThenBy(x => x.Date).ThenBy(x => String.IsNullOrEmpty(x.Time) ? "99:99" : x.Time).ThenByDescending(x => x.Important).ToList();
             daySummary.Text = mode == 2 ? "删除的记录可以在这里恢复" : items.Count + " 项安排 · " + items.Count(x => x.Completed) + " 项已完成";
             taskList.Children.Clear();
@@ -394,7 +450,7 @@ namespace LittleCalendar
             bool overdue = !view.Item.Completed && instant >= end;
             bool soon = !view.Item.Completed && !overdue && end - instant <= TimeSpan.FromHours(24);
             string background = view.Item.Completed ? "#E1E7E4" : overdue ? "#F3D7D2" : !view.Item.Deadline.Confirmed ? "#F7E7C4" : soon ? "#F5DEB7" : CalendarPalette.NormalDeadline(view.Item);
-            string foreground = view.Item.Completed ? "#7B8C85" : overdue ? "#9E4338" : !view.Item.Deadline.Confirmed || soon ? "#825A22" : "#216E5B";
+            string foreground = view.Item.Completed ? "#7B8C85" : overdue ? "#9E4338" : !view.Item.Deadline.Confirmed || soon ? "#825A22" : AppearancePalette.Current.AccentText;
             view.Surface.Background = UI.Brush(background); view.Label.Foreground = UI.Brush(foreground);
             view.Button.ToolTip = view.Item.Title + "\n" + Deadlines.Description(view.Item, now);
         }

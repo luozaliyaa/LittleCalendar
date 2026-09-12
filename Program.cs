@@ -58,6 +58,40 @@ namespace LittleCalendar
             var startup = UI.Option("↗", "随 Windows 登录启动，在托盘等待提醒", "开机启动选项"); startup.IsChecked = originalStartup; panel.Children.Add(startup);
             var help = UI.Text("关闭窗口后仍会提醒。通过托盘菜单退出或关机后，提醒会暂停；再次运行会补发当天及次日未过期的提醒。", 12, "#82958C"); help.Margin = new Thickness(0, 8, 0, 18); panel.Children.Add(help);
             var preview = UI.Button("看看提醒长什么样", testReminder); preview.HorizontalAlignment = HorizontalAlignment.Left; preview.Margin = new Thickness(0, 0, 0, 18); panel.Children.Add(preview);
+            panel.Children.Add(UI.Text("外观", 16, "#355449"));
+            AppearanceSettings savedAppearance = (controller.Data.Appearance ?? new AppearanceSettings()).Copy();
+            AppearancePalette.Normalize(savedAppearance);
+            var theme = new ComboBox { HorizontalAlignment = HorizontalAlignment.Left, MinWidth = 220 };
+            theme.Items.Add(new ComboBoxItem { Content = "翡翠绿", Tag = "emerald" });
+            theme.Items.Add(new ComboBoxItem { Content = "静谧蓝", Tag = "blue" });
+            theme.Items.Add(new ComboBoxItem { Content = "暖紫色", Tag = "purple" });
+            theme.SelectedIndex = new[] { "emerald", "blue", "purple" }.ToList().IndexOf(savedAppearance.Theme);
+            panel.Children.Add(UI.Field("页面配色", theme));
+            var opacity = new Slider { Minimum = 70, Maximum = 100, TickFrequency = 5, IsSnapToTickEnabled = true, Value = savedAppearance.BackgroundOpacity, Width = 230, HorizontalAlignment = HorizontalAlignment.Left };
+            var opacityValue = UI.Text(((int)opacity.Value) + "%", 12, "#607873");
+            opacity.ValueChanged += delegate { opacityValue.Text = ((int)opacity.Value) + "%"; };
+            var opacityRow = new StackPanel { Orientation = Orientation.Horizontal }; opacityRow.Children.Add(opacity); opacityValue.Margin = new Thickness(12, 0, 0, 0); opacityRow.Children.Add(opacityValue);
+            panel.Children.Add(UI.Field("页面背景透明度", opacityRow));
+            var backgroundMode = new ComboBox { HorizontalAlignment = HorizontalAlignment.Left, MinWidth = 220 };
+            backgroundMode.Items.Add(new ComboBoxItem { Content = "铺满裁切（不拉伸）", Tag = "cover" });
+            backgroundMode.Items.Add(new ComboBoxItem { Content = "完整显示（不拉伸）", Tag = "contain" });
+            backgroundMode.SelectedIndex = savedAppearance.BackgroundMode == "contain" ? 1 : 0;
+            panel.Children.Add(UI.Field("背景图片适配", backgroundMode));
+            string pendingBackgroundPath = ""; bool removeBackground = false;
+            var backgroundHint = UI.Text(String.IsNullOrWhiteSpace(savedAppearance.BackgroundFile) ? "未设置背景图片。支持 JPG、PNG、BMP，最大 10 MB。" : "当前已设置本地背景图片；保存后仍由小日历管理，不依赖原文件位置。", 12, "#82958C");
+            backgroundHint.TextWrapping = TextWrapping.Wrap; panel.Children.Add(backgroundHint);
+            var backgroundActions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 18) };
+            backgroundActions.Children.Add(UI.Button("选择背景图片", delegate {
+                var dialog = new OpenFileDialog { Filter = "图片文件 (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp" };
+                if (dialog.ShowDialog(this) != true) return;
+                if (new FileInfo(dialog.FileName).Length > 10 * 1024 * 1024) { message.Text = "背景图片请控制在 10 MB 以内。"; return; }
+                pendingBackgroundPath = dialog.FileName; removeBackground = false; backgroundHint.Text = "已选择：" + Path.GetFileName(dialog.FileName) + "。保存设置后生效。";
+            }));
+            backgroundActions.Children.Add(UI.Button("移除背景图", delegate { pendingBackgroundPath = ""; removeBackground = true; backgroundHint.Text = "保存设置后将移除背景图片。"; }));
+            backgroundActions.Children.Add(UI.Button("恢复默认外观", delegate {
+                theme.SelectedIndex = 0; opacity.Value = 100; backgroundMode.SelectedIndex = 0; pendingBackgroundPath = ""; removeBackground = true; backgroundHint.Text = "保存设置后恢复默认外观。";
+            }));
+            panel.Children.Add(backgroundActions);
             panel.Children.Add(UI.Text("智能整理 · DeepSeek", 16, "#355449"));
             var agentEnabled = UI.Option("✦", "每天自动整理一次近期待办", "启用每日智能整理"); agentEnabled.IsChecked = controller.Data.Agent.Enabled; panel.Children.Add(agentEnabled);
             var agentTime = new TextBox { Text = controller.Data.Agent.DailyTime, MaxLength = 5 }; panel.Children.Add(UI.Field("每日总结时间", agentTime));
@@ -217,7 +251,23 @@ namespace LittleCalendar
                     if (requested != originalStartup) Startup.Set(requested);
                     try {
                         if (!String.IsNullOrWhiteSpace(key.Password)) secrets.Save(key.Password);
-                        controller.Commit(data => { data.ReminderTime = time.Text.Trim(); data.Sound = sound.IsChecked == true; data.Agent.Enabled = agentEnabled.IsChecked == true; data.Agent.DailyTime = agentTime.Text.Trim(); data.Agent.Model = model.Text.Trim(); });
+                        var appearance = savedAppearance.Copy();
+                        appearance.Theme = (string)((ComboBoxItem)theme.SelectedItem).Tag;
+                        appearance.BackgroundOpacity = (int)opacity.Value;
+                        appearance.BackgroundMode = (string)((ComboBoxItem)backgroundMode.SelectedItem).Tag;
+                        string importedBackground = "";
+                        if (!String.IsNullOrWhiteSpace(pendingBackgroundPath)) {
+                            importedBackground = AppearanceFiles.Import(dataDirectory, pendingBackgroundPath);
+                            appearance.BackgroundFile = importedBackground;
+                        } else if (removeBackground) appearance.BackgroundFile = "";
+                        AppearancePalette.Normalize(appearance);
+                        try {
+                            controller.Commit(data => { data.ReminderTime = time.Text.Trim(); data.Sound = sound.IsChecked == true; data.Agent.Enabled = agentEnabled.IsChecked == true; data.Agent.DailyTime = agentTime.Text.Trim(); data.Agent.Model = model.Text.Trim(); data.Appearance = appearance.Copy(); });
+                        } catch {
+                            if (!String.IsNullOrWhiteSpace(importedBackground)) AppearanceFiles.Delete(dataDirectory, importedBackground);
+                            throw;
+                        }
+                        if (!String.Equals(savedAppearance.BackgroundFile, appearance.BackgroundFile, StringComparison.Ordinal)) AppearanceFiles.Delete(dataDirectory, savedAppearance.BackgroundFile);
                         if (mailEnabled.IsChecked == true && String.IsNullOrWhiteSpace(mailAuthorization.Password) && !mailSecrets.HasKey)
                             throw new ArgumentException("启用邮箱同步前，请填写网易邮箱授权码。");
                         if (!String.IsNullOrWhiteSpace(mailAuthorization.Password)) mailSecrets.Save(mailAuthorization.Password);
