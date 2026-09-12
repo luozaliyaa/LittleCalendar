@@ -74,7 +74,8 @@ namespace LittleCalendar
             theme.Items.Add(new ComboBoxItem { Content = "翡翠绿", Tag = "emerald" });
             theme.Items.Add(new ComboBoxItem { Content = "静谧蓝", Tag = "blue" });
             theme.Items.Add(new ComboBoxItem { Content = "暖紫色", Tag = "purple" });
-            theme.SelectedIndex = new[] { "emerald", "blue", "purple" }.ToList().IndexOf(savedAppearance.Theme);
+            theme.Items.Add(new ComboBoxItem { Content = "樱花粉", Tag = "sakura" });
+            theme.SelectedIndex = new[] { "emerald", "blue", "purple", "sakura" }.ToList().IndexOf(savedAppearance.Theme);
             panel.Children.Add(UI.Field("页面配色", theme));
             var opacity = new Slider { Minimum = 70, Maximum = 100, TickFrequency = 5, IsSnapToTickEnabled = true, Value = savedAppearance.BackgroundOpacity, Width = 230, HorizontalAlignment = HorizontalAlignment.Left };
             var opacityValue = UI.Text(((int)opacity.Value) + "%", 12, "#607873");

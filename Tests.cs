@@ -937,6 +937,13 @@ internal static class CalendarTests
                 Check(colors.Count == 2, "Different normal deadlines share the same visual color");
             }
         });
+        Test("sakura theme keeps its palette and coordinated task bubble colors", delegate {
+            var settings = new AppearanceSettings { Theme = "sakura" };
+            AppearancePalette.Normalize(settings);
+            AppearanceProfile palette = AppearancePalette.For(settings);
+            Check(settings.Theme == "sakura", "Sakura theme is not preserved by appearance normalization");
+            Check(palette.Accent == "#C65E82" && palette.Bubbles.Length == 5, "Sakura theme palette is incomplete");
+        });
         Test("busy day exposes a clear overflow action and opens every item in the side panel", delegate {
             DateTime now = new DateTime(2026, 9, 4, 10, 0, 0);
             DateTime busyDay = new DateTime(2026, 9, 5);

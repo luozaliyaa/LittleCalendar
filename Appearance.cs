@@ -41,7 +41,7 @@ namespace LittleCalendar
         public static void Normalize(AppearanceSettings value)
         {
             if (value == null) return;
-            if (!new[] { "emerald", "blue", "purple" }.Contains(value.Theme)) value.Theme = "emerald";
+            if (!new[] { "emerald", "blue", "purple", "sakura" }.Contains(value.Theme)) value.Theme = "emerald";
             if (value.BackgroundOpacity < 70 || value.BackgroundOpacity > 100) value.BackgroundOpacity = 100;
             value.BackgroundFile = value.BackgroundFile ?? "";
             if (!new[] { "cover", "contain" }.Contains(value.BackgroundMode)) value.BackgroundMode = "cover";
@@ -59,6 +59,11 @@ namespace LittleCalendar
                 Canvas = "#F7F5FA", Accent = "#7655A7", AccentText = "#573E81", SelectedDay = "#EEE6F7", SelectedBorder = "#B69ADB",
                 AgentBackground = "#F6F0FB", AgentBorder = "#E1D2F0", TabBackground = "#F5F1F8", TabText = "#88799A",
                 Bubbles = new[] { "#EADFF6", "#E5E3F7", "#F2E2F1", "#DFEAF7", "#EEE7DA" }
+            };
+            if (settings.Theme == "sakura") return new AppearanceProfile {
+                Canvas = "#FFF7FA", Accent = "#C65E82", AccentText = "#98465F", SelectedDay = "#FBE3EC", SelectedBorder = "#E7A7BA",
+                AgentBackground = "#FFF0F5", AgentBorder = "#F3CCD9", TabBackground = "#FCF1F5", TabText = "#9B7784",
+                Bubbles = new[] { "#F9DCE6", "#F5E4EF", "#F9E5D7", "#E9E0F6", "#F7EAEA" }
             };
             return new AppearanceProfile {
                 Canvas = "#F4F7F7", Accent = "#197B68", AccentText = "#197B68", SelectedDay = "#E2F2EC", SelectedBorder = "#75BCA6",
