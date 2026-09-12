@@ -515,6 +515,8 @@ namespace LittleCalendar
         [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
         private static Icon CreateIcon()
         {
+            string customIconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "LittleCalendar.ico");
+            if (File.Exists(customIconPath)) return new Icon(customIconPath);
             using (var bitmap = new Bitmap(32, 32)) {
                 using (Graphics g = Graphics.FromImage(bitmap))
                 using (var accent = new SolidBrush(Color.FromArgb(25, 123, 104))) {

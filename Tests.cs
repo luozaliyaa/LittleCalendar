@@ -143,6 +143,13 @@ internal static class CalendarTests
     {
         root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "test-results", DateTime.Now.ToString("yyyyMMdd-HHmmss")));
         Directory.CreateDirectory(root);
+        Test("application package contains a readable custom icon", delegate {
+            string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "LittleCalendar.ico");
+            Check(File.Exists(iconPath), "Custom icon file is missing from the application package");
+            using (var appIcon = new System.Drawing.Icon(iconPath)) {
+                Check(appIcon.Width >= 16 && appIcon.Height >= 16, "Custom icon could not be read");
+            }
+        });
         Test("v2 calendar upgrades without treating legacy completed work as newly completed", delegate {
             string json = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new {
                 Version = 2, ReminderTime = "19:00", Sound = true,

@@ -6,6 +6,8 @@ $compilerPath = Join-Path $frameworkPath 'csc.exe'
 if (!(Test-Path -LiteralPath $compilerPath)) { throw '需要 Windows .NET Framework 4.x。' }
 $outputPath = Join-Path $calendarRoot $OutputDirectory
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
+$appIconPath = Join-Path $calendarRoot 'assets\LittleCalendar.ico'
+if (!(Test-Path -LiteralPath $appIconPath)) { throw '缺少应用图标资源。请先生成 assets\LittleCalendar.ico。' }
 $references = @('System.dll', 'System.Core.dll', 'System.Security.dll', 'System.Web.Extensions.dll', 'System.Windows.Forms.dll', 'System.Drawing.dll', 'WPF\WindowsBase.dll', 'WPF\PresentationCore.dll', 'WPF\PresentationFramework.dll', 'System.Xaml.dll') | ForEach-Object { '/reference:' + (Join-Path $frameworkPath $_) }
 $packageRoot = Join-Path $calendarRoot '.packages'
 $mailKitPath = Join-Path $packageRoot 'MailKit.4.17.0\lib\net462\MailKit.dll'
@@ -35,9 +37,10 @@ $packageDlls = Get-ChildItem -LiteralPath $packageRoot -Recurse -Filter '*.dll' 
   }
 $packageReferences = $packageDlls | ForEach-Object { '/reference:' + $_.FullName }
 $sourceFiles = @('MailModels.cs', 'MailStore.cs', 'MailDiagnostics.cs', 'MailClient.cs', 'MailAnalysis.cs', 'MailSync.cs', 'Model.cs', 'Deadlines.cs', 'CalendarVisuals.cs', 'Appearance.cs', 'DeadlineFields.cs', 'Agent.cs', 'Desktop.cs', 'Program.cs') | ForEach-Object { Join-Path $calendarRoot $_ }
-& $compilerPath /nologo /utf8output /target:winexe /optimize+ /platform:anycpu ('/out:' + (Join-Path $outputPath 'LittleCalendar.exe')) ('/win32manifest:' + (Join-Path $calendarRoot 'app.manifest')) ('/resource:' + (Join-Path $calendarRoot 'Theme.xaml') + ',Theme.xaml') @references @packageReferences @sourceFiles
+& $compilerPath /nologo /utf8output /target:winexe /optimize+ /platform:anycpu ('/out:' + (Join-Path $outputPath 'LittleCalendar.exe')) ('/win32icon:' + $appIconPath) ('/win32manifest:' + (Join-Path $calendarRoot 'app.manifest')) ('/resource:' + (Join-Path $calendarRoot 'Theme.xaml') + ',Theme.xaml') @references @packageReferences @sourceFiles
 if ($LASTEXITCODE -ne 0) { throw '日历程序构建失败。' }
 $packageDlls | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $outputPath $_.Name) -Force }
+Copy-Item -LiteralPath $appIconPath -Destination (Join-Path $outputPath 'LittleCalendar.ico') -Force
 Copy-Item -LiteralPath (Join-Path $calendarRoot 'README.md') -Destination (Join-Path $outputPath '使用说明.md') -Force
 Write-Output ('已生成：' + (Join-Path $outputPath 'LittleCalendar.exe'))
 if ($Test) {
