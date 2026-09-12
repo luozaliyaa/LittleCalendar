@@ -233,6 +233,7 @@ namespace LittleCalendar
             data.Agent.DailyTime = String.IsNullOrWhiteSpace(data.Agent.DailyTime) ? "09:00" : data.Agent.DailyTime;
             data.Agent.Model = String.IsNullOrWhiteSpace(data.Agent.Model) ? "deepseek-v4-flash" : data.Agent.Model.Trim();
             data.Agent.LastAutomaticDate = data.Agent.LastAutomaticDate ?? ""; data.Agent.LastSummaryAt = data.Agent.LastSummaryAt ?? "";
+            data.Agent.LastSummaryAttemptAt = data.Agent.LastSummaryAttemptAt ?? ""; data.Agent.LastSummaryError = data.Agent.LastSummaryError ?? "";
             if (!Dates.IsTime(data.Agent.DailyTime) || (!String.IsNullOrEmpty(data.Agent.LastAutomaticDate) && !Dates.IsDate(data.Agent.LastAutomaticDate))) throw new InvalidDataException("智能整理设置格式无效。");
             var ids = new HashSet<string>();
             foreach (Todo item in data.Items) {

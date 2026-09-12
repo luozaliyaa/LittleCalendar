@@ -81,6 +81,142 @@ namespace LittleCalendar
             System.Windows.Automation.AutomationProperties.SetName(option, name);
             return option;
         }
+        public static CheckBox Toggle(string text, string name)
+        {
+            var toggle = new CheckBox { Content = text };
+            toggle.SetResourceReference(FrameworkElement.StyleProperty, "ToggleSwitch");
+            System.Windows.Automation.AutomationProperties.SetName(toggle, name);
+            return toggle;
+        }
+    }
+
+    public sealed class ChatWindow : Window
+    {
+        private readonly ListBox messages = new ListBox { Background = Brushes.Transparent, BorderThickness = new Thickness(0), HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        private readonly TextBox input = new TextBox { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 80, MaxHeight = 150, MaxLength = 2000, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        private readonly TextBlock progress = UI.Text("", 12, "#607873");
+        private readonly TextBlock empty = UI.Text("可以查询今天、明天、未来七天的待办，或读取上次同步后的新邮件。没有配置智能服务时，也能查询本地待办。", 14, "#607873");
+        private readonly StackPanel confirmation = new StackPanel { Visibility = Visibility.Collapsed };
+        private readonly List<Button> shortcuts = new List<Button>();
+        private readonly Button send;
+        private readonly Button clear;
+        private readonly Action<string> sendMessage;
+        public bool IsBusy { get; private set; }
+
+        private sealed class TodoLink
+        {
+            public string Id { get; set; }
+            public string Label { get; set; }
+        }
+        private sealed class MessageView
+        {
+            public string Role { get; set; }
+            public string Speaker { get; set; }
+            public string Text { get; set; }
+            public string SyncText { get; set; }
+            public List<TodoLink> Links { get; set; }
+        }
+
+        public ChatWindow(ChatHistory history, Action<string> sendMessage, Action clearHistory, Action<string> navigateTodo)
+        {
+            this.sendMessage = sendMessage;
+            SetResourceReference(StyleProperty, typeof(Window));
+            Title = "对话助手 · 小日历"; Width = 720; Height = 780; MinWidth = 540; MinHeight = 560;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner; ShowInTaskbar = false;
+            var root = new Grid { Margin = new Thickness(22) };
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition());
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var header = new DockPanel { Margin = new Thickness(0, 0, 0, 14) };
+            clear = UI.Button("清空对话", delegate { if (!IsBusy) confirmation.Visibility = Visibility.Visible; });
+            AutomationProperties.SetName(clear, "清空对话"); DockPanel.SetDock(clear, Dock.Right); header.Children.Add(clear);
+            header.Children.Add(UI.Stack(UI.Text("对话助手", 24, "#197B68"), UI.Text("待办查询 · 新邮件增量同步", 12, "#78918A"))); root.Children.Add(header);
+            var conversation = new Grid(); Grid.SetRow(conversation, 1); root.Children.Add(conversation);
+            AutomationProperties.SetName(messages, "对话消息列表");
+            VirtualizingStackPanel.SetIsVirtualizing(messages, true); VirtualizingStackPanel.SetVirtualizationMode(messages, VirtualizationMode.Recycling);
+            VirtualizingPanel.SetScrollUnit(messages, ScrollUnit.Pixel);
+            ScrollViewer.SetCanContentScroll(messages, true); ScrollViewer.SetHorizontalScrollBarVisibility(messages, ScrollBarVisibility.Disabled);
+            messages.SetResourceReference(ItemsControl.ItemTemplateProperty, "ChatMessageTemplate");
+            messages.SetResourceReference(ItemsControl.ItemContainerStyleProperty, "ChatMessageContainer");
+            messages.AddHandler(Button.ClickEvent, new RoutedEventHandler(delegate(object sender, RoutedEventArgs args) {
+                Button link = args.OriginalSource as Button;
+                if (link != null && link.Tag is string && navigateTodo != null) { navigateTodo((string)link.Tag); args.Handled = true; }
+            }));
+            conversation.Children.Add(messages); empty.Margin = new Thickness(30); empty.VerticalAlignment = VerticalAlignment.Center; conversation.Children.Add(empty);
+            var composer = new StackPanel { Margin = new Thickness(0, 12, 0, 0) }; Grid.SetRow(composer, 2); root.Children.Add(composer);
+            confirmation.Children.Add(UI.Text("清空本机对话记录？日历待办不会受影响。", 13, "#8C583C"));
+            var confirmButtons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 10) };
+            confirmButtons.Children.Add(UI.Button("取消清空", delegate { confirmation.Visibility = Visibility.Collapsed; }));
+            confirmButtons.Children.Add(UI.Button("确认清空", delegate {
+                if (IsBusy) return;
+                confirmation.Visibility = Visibility.Collapsed; SetBusy(true, "正在清空对话…");
+                if (clearHistory != null) clearHistory();
+            })); confirmation.Children.Add(confirmButtons); composer.Children.Add(confirmation);
+            var chips = new WrapPanel { Margin = new Thickness(0, 0, 0, 10) };
+            foreach (string label in new[] { "读取新邮件", "今天要做什么", "明天截止", "未来七天" }) {
+                string command = label;
+                var chip = UI.Button(label, delegate { if (!IsBusy) { input.Text = command; Submit(); } });
+                chip.Padding = new Thickness(10, 7, 10, 7); chip.Margin = new Thickness(0, 0, 6, 6);
+                shortcuts.Add(chip); chips.Children.Add(chip);
+            }
+            composer.Children.Add(chips); AutomationProperties.SetName(input, "消息输入框"); composer.Children.Add(input);
+            input.PreviewKeyDown += delegate(object sender, KeyEventArgs args) {
+                if (args.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Shift) == 0) { args.Handled = true; Submit(); }
+            };
+            var footer = new DockPanel { Margin = new Thickness(0, 10, 0, 0) };
+            send = UI.Button("发送消息", Submit, true); AutomationProperties.SetName(send, "发送消息"); DockPanel.SetDock(send, Dock.Right); footer.Children.Add(send);
+            footer.Children.Add(UI.Stack(progress, UI.Text("Enter 发送 · Shift+Enter 换行", 11, "#78918A"))); composer.Children.Add(footer);
+            Content = root; DisplayHistory(history);
+            Loaded += delegate { input.Focus(); };
+        }
+
+        private void Submit()
+        {
+            if (IsBusy || String.IsNullOrWhiteSpace(input.Text) || sendMessage == null) return;
+            SetBusy(true, "正在处理消息…"); sendMessage(input.Text.Trim());
+        }
+
+        public void SetBusy(bool busy, string status)
+        {
+            IsBusy = busy; input.IsEnabled = send.IsEnabled = clear.IsEnabled = !busy;
+            foreach (Button chip in shortcuts) chip.IsEnabled = !busy;
+            if (busy) confirmation.Visibility = Visibility.Collapsed;
+            progress.Text = status ?? "";
+        }
+
+        public void CompleteSend(ChatHistory history, string status, bool clearInput)
+        {
+            if (history != null) DisplayHistory(history);
+            if (clearInput) input.Clear();
+            SetBusy(false, status); input.Focus();
+        }
+
+        private void DisplayHistory(ChatHistory history)
+        {
+            // Render the store's safe display projection, never raw input or model output.
+            var views = (history ?? new ChatHistory()).Messages.Select(message => new MessageView {
+                Role = message.Role, Speaker = message.Role == "user" ? "你" : "助手", Text = message.Sync == null ? message.Text : (message.Text ?? "").Split('\n')[0],
+                SyncText = SyncText(message.Sync), Links = message.TodoIds.Select((id, index) => new TodoLink { Id = id, Label = "在日历中查看待办 " + (index + 1) }).ToList()
+            }).ToList();
+            messages.ItemsSource = views; empty.Visibility = views.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            if (views.Count > 0) messages.ScrollIntoView(views.Last());
+        }
+
+        private static string SyncText(ChatSyncSummary sync)
+        {
+            if (sync == null) return null;
+            Func<string, string> time = value => {
+                DateTimeOffset timestamp;
+                return DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp) ? timestamp.ToString("yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture) : "无记录";
+            };
+            var lines = new List<string> {
+                "上次完成：" + time(sync.PreviousCompletedAt), "开始：" + time(sync.StartedAt) + "\n完成：" + time(sync.CompletedAt),
+                "扫描 " + sync.ScannedCount + " 封 · 新增待办 " + sync.CreatedCount + " 项 · 通知 " + sync.NoticeCount + " 条 · 错误 " + sync.ErrorCount + " 项"
+            };
+            foreach (ChatFolderCursorSummary folder in sync.Folders) lines.Add(folder.DisplayName + " · UID " + folder.PreviousUid + " → 请求 " + folder.RequestedMinimumUid + " → " + folder.FinalUid +
+                " · 读取 " + folder.FetchedCount + " 封\n上次扫描：" + time(folder.PreviousScannedAt) + "\n完成：" + time(folder.CompletedAt) + (String.IsNullOrEmpty(folder.Error) ? "" : " · 同步出错，请重试"));
+            return String.Join("\n", lines);
+        }
     }
 
     public sealed class CalendarWindow : Window
@@ -109,6 +245,7 @@ namespace LittleCalendar
         public DateTime SelectedDate { get; private set; }
         public DateTime VisibleMonth { get; private set; }
         public Action SettingsRequested;
+        public Action ChatRequested;
         public Action AgentSummaryRequested;
         public CalendarWindow(CalendarController controller, Func<DateTime> clock = null)
         {
@@ -136,6 +273,8 @@ namespace LittleCalendar
             AutomationProperties.SetName(search, "搜索所有待办"); AutomationProperties.SetName(searchShell, "搜索待办框"); actions.Children.Add(searchShell);
             opportunityButton.Click += delegate { new OpportunityWindow(controller) { Owner = this }.ShowDialog(); };
             actions.Children.Add(opportunityButton);
+            var chatButton = UI.Button("对话助手", delegate { if (ChatRequested != null) ChatRequested(); });
+            AutomationProperties.SetName(chatButton, "对话助手"); actions.Children.Add(chatButton);
             actions.Children.Add(UI.Button("提醒设置", delegate { if (SettingsRequested != null) SettingsRequested(); }));
             actions.Children.Add(UI.Button("＋ 新建待办", delegate { Edit(null); }, true));
             Grid.SetColumn(actions, 1); header.Children.Add(actions); root.Children.Add(header);
@@ -188,7 +327,7 @@ namespace LittleCalendar
             agentDetails.TextWrapping = TextWrapping.Wrap; content.Children.Add(agentDetails);
             var footer = new Grid { Margin = new Thickness(0, 8, 0, 0) }; footer.ColumnDefinitions.Add(new ColumnDefinition()); footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             footer.Children.Add(agentStatus); agentMore.Padding = new Thickness(8, 4, 8, 4); agentMore.Click += delegate {
-                if (controller.Data.Agent.LastSummary != null) new AgentSummaryWindow(controller.Data.Agent.LastSummary, controller.Data.Agent.LastSummaryAt) { Owner = this }.ShowDialog();
+                if (controller.Data.Agent.LastSummary != null) new AgentSummaryWindow(controller.Data.Agent.LastSummary, controller.Data.Agent.LastSummaryAt, controller.Data.Agent.LastSummaryError) { Owner = this }.ShowDialog();
             }; Grid.SetColumn(agentMore, 1); footer.Children.Add(agentMore); content.Children.Add(footer);
             var card = new Border { Background = UI.Brush("#F1F8F5"), BorderBrush = UI.Brush("#D2E7DF"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12), Padding = new Thickness(14), Margin = new Thickness(0, 16, 0, 0), Child = content };
             AutomationProperties.SetName(card, "智能整理卡片"); return card;
@@ -196,14 +335,20 @@ namespace LittleCalendar
         private void RefreshAgent()
         {
             AgentSummary summary = controller.Data.Agent.LastSummary;
+            string lastError = controller.Data.Agent.LastSummaryError;
             if (summary == null) {
                 agentOverview.Text = "让 DeepSeek 帮你整理今天和未来两周的安排。";
-                agentDetails.Text = "点击立即总结；首次使用请先在提醒设置中配置 API Key。"; agentStatus.Text = "尚未生成总结"; agentMore.Visibility = Visibility.Collapsed;
+                agentDetails.Text = "点击立即总结；首次使用请先在提醒设置中配置 API Key。";
+                agentStatus.Text = String.IsNullOrWhiteSpace(lastError) ? "尚未生成总结" : "上次整理失败：" + lastError;
+                agentMore.Visibility = Visibility.Collapsed;
             } else {
-                agentOverview.Text = summary.Overview;
-                var lines = summary.Today.Concat(summary.Upcoming).Concat(summary.Risks).Take(3).Select(x => "• " + x).ToArray();
-                agentDetails.Text = lines.Length == 0 ? "近期没有额外事项。" : String.Join("\n", lines);
-                DateTimeOffset when; agentStatus.Text = DateTimeOffset.TryParse(controller.Data.Agent.LastSummaryAt, out when) ? "更新于 " + when.LocalDateTime.ToString("M月d日 HH:mm") : "已缓存";
+                AgentCardProjection view = AgentCardProjection.From(summary);
+                agentOverview.Text = view.Headline;
+                var lines = view.Priorities.Select((x, i) => (i + 1) + "  " + x).ToList();
+                string priorities = lines.Count == 0 ? "暂时没有需要特别关注的事项。" : "优先处理\n" + String.Join("\n", lines);
+                agentDetails.Text = String.IsNullOrWhiteSpace(view.Risk) ? priorities : priorities + "\n\n⚠ 风险提醒\n" + view.Risk;
+                DateTimeOffset when; string cachedAt = DateTimeOffset.TryParse(controller.Data.Agent.LastSummaryAt, out when) ? when.LocalDateTime.ToString("M月d日 HH:mm") : "未知时间";
+                agentStatus.Text = String.IsNullOrWhiteSpace(lastError) ? "更新于 " + cachedAt : "上次整理失败：" + lastError + "；仍显示旧总结（" + cachedAt + "）";
                 agentMore.Visibility = Visibility.Visible;
             }
         }
@@ -390,12 +535,8 @@ namespace LittleCalendar
         }
         private static void RefreshDeadlineBar(DeadlineBarView view, DateTime now)
         {
-            DateTimeOffset instant = new DateTimeOffset(now), end = Deadlines.End(view.Item.Deadline);
-            bool overdue = !view.Item.Completed && instant >= end;
-            bool soon = !view.Item.Completed && !overdue && end - instant <= TimeSpan.FromHours(24);
-            string background = view.Item.Completed ? "#E1E7E4" : overdue ? "#F3D7D2" : !view.Item.Deadline.Confirmed ? "#F7E7C4" : soon ? "#F5DEB7" : CalendarPalette.NormalDeadline(view.Item);
-            string foreground = view.Item.Completed ? "#7B8C85" : overdue ? "#9E4338" : !view.Item.Deadline.Confirmed || soon ? "#825A22" : "#216E5B";
-            view.Surface.Background = UI.Brush(background); view.Label.Foreground = UI.Brush(foreground);
+            view.Surface.Background = UI.Brush(CalendarPalette.DeadlineBackground(view.Item, now));
+            view.Label.Foreground = UI.Brush(CalendarPalette.DeadlineForeground(view.Item, now));
             view.Button.ToolTip = view.Item.Title + "\n" + Deadlines.Description(view.Item, now);
         }
         public void Edit(Todo item)
@@ -444,13 +585,17 @@ namespace LittleCalendar
 
     public sealed class AgentSummaryWindow : Window
     {
-        public AgentSummaryWindow(AgentSummary summary, string updatedAt)
+        public AgentSummaryWindow(AgentSummary summary, string updatedAt, string lastError = "")
         {
             SetResourceReference(StyleProperty, typeof(Window)); Title = "近期工作总结"; Width = 600; Height = 650; MinWidth = 500; MinHeight = 480; WindowStartupLocation = WindowStartupLocation.CenterOwner; ShowInTaskbar = false;
             var panel = new StackPanel { Margin = new Thickness(28) };
             panel.Children.Add(UI.Text("✦ 近期工作总结", 23, "#197B68"));
             DateTimeOffset when; string time = DateTimeOffset.TryParse(updatedAt, out when) ? "更新于 " + when.LocalDateTime.ToString("yyyy年M月d日 HH:mm") : "本机缓存";
             var meta = UI.Text(time, 12, "#82958C"); meta.Margin = new Thickness(0, 4, 0, 20); panel.Children.Add(meta);
+            if (!String.IsNullOrWhiteSpace(lastError)) {
+                var stale = UI.Text("上次整理失败：" + lastError + " 当前显示的是旧总结。", 12, "#A2663F");
+                stale.TextWrapping = TextWrapping.Wrap; stale.Margin = new Thickness(0, -10, 0, 18); panel.Children.Add(stale);
+            }
             var overview = UI.Text(summary.Overview, 15, "#355449"); overview.TextWrapping = TextWrapping.Wrap; overview.Margin = new Thickness(0, 0, 0, 18); panel.Children.Add(overview);
             AddSection(panel, "今天优先", summary.Today); AddSection(panel, "近期安排", summary.Upcoming); AddSection(panel, "风险提示", summary.Risks);
             var close = UI.Button("关闭", delegate { Close(); }, true); close.HorizontalAlignment = HorizontalAlignment.Right; panel.Children.Add(close);

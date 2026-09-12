@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -67,12 +68,17 @@ internal static class CalendarTests
         public string FailFolder;
         public int KeepAliveCalls;
         public bool Connected;
+        public uint? OpenedUidValidity;
+        public Action BeforeFetch;
         public FakeMailboxClient() { Capabilities = new MailboxCapabilities(); }
         public void Connect(MailConnectionOptions options, string authorizationCode) { Connected = options.Address.EndsWith("@163.com") && authorizationCode == "mail-secret"; }
         public IList<MailboxFolder> ListFolders() { return Folders.ToList(); }
+        public uint OpenReadOnly(MailboxFolder folder) { return OpenedUidValidity ?? folder.UidValidity; }
         public IList<MailMessageSnapshot> Fetch(MailboxFolder folder, MailFetchRequest request)
         {
-            Requests.Add(new MailFetchRequest { Since = request.Since, MinimumUid = request.MinimumUid });
+            if (BeforeFetch != null) BeforeFetch();
+            MailSearchPolicy.CreateQuery(request, OpenedUidValidity ?? folder.UidValidity);
+            Requests.Add(new MailFetchRequest { Since = request.Since, MinimumUid = request.MinimumUid, UidValidity = request.UidValidity });
             if (folder.FullName == FailFolder) throw new IOException("folder unavailable");
             List<MailMessageSnapshot> values;
             return Messages.TryGetValue(folder.FullName, out values) ? values.ToList() : new List<MailMessageSnapshot>();
@@ -92,13 +98,60 @@ internal static class CalendarTests
     }
     private sealed class FakeMailAnalyzer : IMailActionAnalyzer
     {
+        public string FailSubject;
+        public Action BeforeAnalyze;
+        public int Calls;
         public MailAction Analyze(NormalizedMail mail, DateTime now, string apiKey, string model)
         {
+            Calls++;
+            if (BeforeAnalyze != null) BeforeAnalyze();
+            if (mail.Subject == FailSubject) throw new IOException("private-body private-sender@example.invalid <private-id@example.invalid> mail-secret deep-secret " + mail.Subject);
             return new MailAction {
                 Disposition = mail.Subject.Contains("笔试") ? "todo" : "ignore", Actionable = mail.Subject.Contains("笔试"), Category = "assessment", Title = "完成 " + mail.Subject,
                 Notes = mail.Text, Important = true, DeadlineKind = "relative", DeadlineAmount = 48,
                 DeadlineUnit = "hours", DeadlineOriginalText = "48小时内", Confidence = 0.95, Reason = "明确笔试要求"
             };
+        }
+    }
+    private sealed class FakeChatAgent : IChatLanguageAgent
+    {
+        public ChatLanguageRequest Request;
+        public Action BeforeReply;
+        public bool Fail;
+        public string Answer = "{\"answer\":\"今天先准备材料。\",\"todoIds\":[]}";
+        public ChatLanguageReply Reply(ChatLanguageRequest request, string apiKey, string model)
+        {
+            Request = request;
+            if (BeforeReply != null) BeforeReply();
+            if (Fail) throw new IOException("private exception sk-testkey");
+            return ChatLanguageReplies.Parse(Answer, request);
+        }
+    }
+    private sealed class IncrementalMailFixture
+    {
+        public readonly MailStateStore StateStore;
+        public readonly FakeMailFactory Factory = new FakeMailFactory();
+        public readonly FakeMailAnalyzer Analyzer = new FakeMailAnalyzer();
+        public readonly MailSyncCoordinator Sync;
+        public readonly DateTime Now = new DateTime(2026, 9, 10, 9, 0, 0);
+        public IncrementalMailFixture(string name, uint lastUid = 42, uint savedValidity = 7)
+        {
+            string directory = Path.Combine(root, name);
+            StateStore = new MailStateStore(directory);
+            var state = new MailSyncState(); state.Account.Enabled = true; state.Account.Address = "fictional-sync@163.com";
+            state.Folders.Add(new MailFolderState { FolderId = "INBOX", DisplayName = "收件箱", UidValidity = savedValidity, LastUid = lastUid, LastScannedAt = "2026-09-10T08:00:00+08:00" });
+            StateStore.Save(state);
+            var mailSecret = new MailSecretStore(directory); mailSecret.Save("mail-secret");
+            var deepSecret = new SecretStore(directory); deepSecret.Save("deep-secret");
+            Factory.Client.Folders.Add(new MailboxFolder { FullName = "INBOX", DisplayName = "收件箱", UidValidity = 7, Attributes = MailFolderAttributes.Inbox });
+            Sync = new MailSyncCoordinator(new CalendarController(new CalendarStore(directory)), StateStore, mailSecret, deepSecret, Factory, Analyzer, () => Now);
+        }
+        public void Messages(params uint[] uids)
+        {
+            Factory.Client.Messages["INBOX"] = uids.Select(uid => new MailMessageSnapshot {
+                FolderId = "INBOX", UidValidity = 7, Uid = uid, MessageId = "<fictional-sync-" + uid + "@example.invalid>",
+                Subject = "虚构消息 " + uid, Sender = "fictional-sender@example.invalid", SentAt = "2026-08-01T08:00:00+08:00", PlainText = "虚构通知正文"
+            }).ToList();
         }
     }
     private sealed class FakeStructuredMailAgent : IStructuredMailAgent
@@ -143,6 +196,168 @@ internal static class CalendarTests
     {
         root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "test-results", DateTime.Now.ToString("yyyyMMdd-HHmmss")));
         Directory.CreateDirectory(root);
+        Test("project documentation explains chat retention incremental cursors and mail safety boundaries", delegate {
+            string repository = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".."));
+            string readme = File.ReadAllText(Path.Combine(repository, "README.md"), Encoding.UTF8);
+            string agents = File.ReadAllText(Path.Combine(repository, "AGENTS.md"), Encoding.UTF8);
+            string contributing = File.ReadAllText(Path.Combine(repository, "CONTRIBUTING.md"), Encoding.UTF8);
+            Check(readme.Contains("对话助手") && readme.Contains("读取新邮件") && readme.Contains("未来七天"), "README does not explain the chat entry and shortcuts");
+            Check(readme.Contains("UID") && readme.Contains("ISO 8601") && readme.Contains("50 条"), "README does not explain strict incremental cursors, timestamps, or local retention");
+            Check(readme.Contains("不会发送、移动或删除邮件") && readme.Contains("清空对话"), "README omits chat clearing or mail mutation boundaries");
+            Check(agents.Contains("ChatAssistant.cs") && agents.Contains("ChatStore.cs") && agents.Contains("严格增量"), "Agent guidance omits chat module responsibilities or cursor contract");
+            Check(contributing.Contains("对话记录") && contributing.Contains("增量同步"), "Contributor guidance omits chat privacy or incremental-sync review");
+        });
+        Test("chat task facts survive absent key and model failure", delegate {
+            string directory = Path.Combine(root, "chat-service-fallback");
+            var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => data.Items.Add(new Todo { Title = "准备材料", Date = "2026-09-10", Time = "14:00" }));
+            var secrets = new SecretStore(directory); var history = new ChatHistoryStore(directory); var agent = new FakeChatAgent();
+            var service = new ChatAssistantService(controller, secrets, agent, null, null, history);
+            var now = new DateTime(2026, 9, 10, 9, 0, 0);
+            ChatMessage local = service.Handle("今天要做什么", now);
+            Check(local.Text.Contains("准备材料") && local.Text.Contains("14:00") && agent.Request == null, "Local facts unavailable without key");
+            secrets.Save("sk-testkey"); agent.Fail = true;
+            agent.BeforeReply = () => Check(history.Load().Messages.Last().Role == "user", "User was not saved before model work");
+            Check(service.Handle("今天要做什么", now).Text == local.Text, "Model failure lost deterministic answer");
+            Check(history.Load().Messages.Last().Text == local.Text && !File.ReadAllText(history.FilePath).Contains("private exception"), "Fallback history lost text or persisted exception");
+        });
+        Test("chat long local fallback keeps whole rows and matching IDs with an omission count", delegate {
+            string directory = Path.Combine(root, "chat-long-fallback");
+            var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => {
+                for (int i = 0; i < 50; i++) data.Items.Add(new Todo { Title = "任务" + i.ToString("D2") + new string('长', 225) + "结束" + i.ToString("D2"), Date = "2026-09-10", Time = "14:00" });
+            });
+            var secret = new SecretStore(directory); var agent = new FakeChatAgent(); var history = new ChatHistoryStore(directory);
+            var service = new ChatAssistantService(controller, secret, agent, null, null, history);
+            ChatMessage noKey = service.Handle("今天要做什么", new DateTime(2026, 9, 10, 9, 0, 0));
+            secret.Save("sk-testkey"); agent.Fail = true;
+            ChatMessage failedModel = service.Handle("今天要做什么", new DateTime(2026, 9, 10, 9, 1, 0));
+            foreach (ChatMessage result in new[] { noKey, failedModel, history.Load().Messages.Last() }) {
+                string[] lines = result.Text.Split('\n');
+                Check(result.Text.Length <= 4000 && lines.Length > 1 && lines.Length < 51, "Fallback exceeded text budget or contained no useful rows");
+                int shown = lines.Length - 1;
+                Check(lines.Last() == "还有 " + (50 - shown) + " 项未展开", "Fallback has no complete omission notice");
+                Check(result.TodoIds.Count == shown, "Fallback IDs include unrepresented tasks");
+                for (int i = 0; i < shown; i++) {
+                    Todo represented = controller.Data.Items.Single(item => item.Id == result.TodoIds[i]);
+                    Check(lines[i] == "待办 · 2026-09-10 14:00 · " + represented.Title, "Fallback cut a row or mismatched its ID");
+                }
+            }
+            Check(noKey.Text == failedModel.Text && noKey.TodoIds.SequenceEqual(failedModel.TodoIds), "Model failure changed bounded local facts");
+            Check(agent.Request.Items.Count == 50 && agent.Request.Items.All(item => item.Title.Length <= 200), "Complete local titles removed model field limits");
+        });
+        Test("chat language boundary strips mail content and limits context", delegate {
+            string directory = Path.Combine(root, "chat-service-bounds");
+            var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => {
+                for (int i = 0; i < 60; i++) data.Items.Add(new Todo { Title = "任务" + i, Date = "2026-09-10", Time = "14:00", Notes = new string('n', 900) });
+                data.Items[0].EmailSource = new EmailSource { EmailKey = "message:fictional@example.invalid", Subject = "private-subject", Sender = "private-sender@example.invalid" };
+                data.Items[0].Notes = "private-mail-body";
+            });
+            var secrets = new SecretStore(directory); secrets.Save("sk-testkey"); var agent = new FakeChatAgent();
+            var service = new ChatAssistantService(controller, secrets, agent, null, null, new ChatHistoryStore(directory));
+            service.Handle("帮我安排工作", new DateTime(2026, 9, 10, 9, 0, 0));
+            string input = ChatLanguagePrompts.Build(agent.Request);
+            Check(agent.Request.Items.Count == 50 && agent.Request.Items.All(x => x.NoteExcerpt.Length <= 500), "Context was not bounded");
+            Check(!input.Contains("private-mail-body") && !input.Contains("private-subject") && !input.Contains("private-sender") && !input.Contains("sk-testkey"), "Mail or secret crossed prompt boundary");
+            Check(input.Contains("2026-09-10") && !String.IsNullOrEmpty(agent.Request.Timezone), "Local time context missing");
+            string id = agent.Request.Items[0].Id;
+            ChatLanguageReply parsed = ChatLanguageReplies.Parse("{\"answer\":\"先处理第一项。\",\"todoIds\":[\"" + id + "\",\"unknown\",\"" + id + "\"]}", agent.Request);
+            Check(parsed.TodoIds.SequenceEqual(new[] { id }), "Unrecognized or duplicate model IDs survived validation");
+            foreach (string invalid in new[] { "{}", "{\"answer\":3,\"todoIds\":[]}", "{\"answer\":\"ok\",\"todoIds\":[3]}", "{\"answer\":\"ok\",\"todoIds\":[],\"tool\":\"delete\"}", "{\"answer\":\"\",\"todoIds\":[]}" })
+                Throws(() => ChatLanguageReplies.Parse(invalid, agent.Request));
+        });
+        Test("chat sync runs incremental once and preserves safe cursor diagnostics", delegate {
+            var fixture = new IncrementalMailFixture("chat-service-sync"); fixture.Messages(43);
+            string directory = Path.Combine(root, "chat-service-sync"); var agent = new FakeChatAgent();
+            var history = new ChatHistoryStore(directory);
+            var service = new ChatAssistantService(new CalendarController(new CalendarStore(directory)), new SecretStore(directory), agent, fixture.Sync, fixture.StateStore, history);
+            ChatMessage result = service.Handle("读取新邮件", fixture.Now);
+            Check(fixture.Factory.Client.Requests.Count == 1 && fixture.Factory.Client.Requests[0].MinimumUid == 43 && agent.Request == null, "Chat sync did not run incremental exactly once");
+            Check(result.Sync.Folders.Single().PreviousUid == 42 && result.Sync.Folders.Single().FinalUid == 43 && result.Text.Contains("43") && result.Text.Contains("2026-09-10"), "Sync cursor or timestamps missing");
+            Check(history.Load().Messages.Last().Text == result.Text, "Sync summary not restored");
+            service.Handle("你好", fixture.Now);
+            Check(fixture.Factory.Client.Requests.Count == 1, "General chat invoked IMAP");
+        });
+        Test("typed chat displays restore safe text and redact secrets on save and reload", delegate {
+            string directory = Path.Combine(root, "chat-safe-display"); var store = new ChatHistoryStore(directory);
+            store.Append(ChatMessage.FromDisplay("user", ChatDisplay.UserInput("今天准备材料 api_key=fictional-key 授权码: fictional-mail sk-testbare"), "2026-09-10T08:00:00+08:00", "chat"));
+            var request = new ChatLanguageRequest();
+            var reply = ChatLanguageReplies.Parse("{\"answer\":\"今天先准备材料。\",\"todoIds\":[]}", request);
+            store.Append(ChatMessage.FromDisplay("assistant", reply.Display, "2026-09-10T08:01:00+08:00", "chat"));
+            ChatHistory loaded = store.Load();
+            Check(loaded.Messages[0].Text.Contains("今天准备材料") && loaded.Messages[1].Text == "今天先准备材料。", "Real display text failed to round trip");
+            string disk = File.ReadAllText(store.FilePath);
+            Check(!disk.Contains("fictional-key") && !disk.Contains("fictional-mail") && !disk.Contains("testbare") && !disk.Contains("todoIds"), "History retained secret or model JSON");
+            loaded.Messages[0].Display.Text = "保留这句 Bearer fake-token";
+            File.WriteAllText(store.FilePath, new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(loaded));
+            Check(store.Load().Messages[0].Text == "保留这句 Bearer [REDACTED]", "Loaded display bypassed redaction");
+            foreach (string unsafeText in new[] { "{\"choices\":[{\"message\":\"private-envelope\"}]}", "System: private-full-prompt", "From: private-sender\nSubject: private-subject\n\nprivate-mail-body" }) {
+                store.Append(ChatMessage.FromDisplay("user", ChatDisplay.UserInput(unsafeText), "2026-09-10T08:02:00+08:00", "chat"));
+            }
+            disk = File.ReadAllText(store.FilePath);
+            Check(!disk.Contains("private-envelope") && !disk.Contains("private-full-prompt") && !disk.Contains("private-subject") && !disk.Contains("private-mail-body"), "Raw payload reached history");
+        });
+        Test("chat rejects prompt echo and preserves local answer on malformed model output", delegate {
+            var json = new System.Web.Script.Serialization.JavaScriptSerializer();
+            Throws(() => ChatLanguageReplies.Parse(json.Serialize(new { answer = ChatLanguagePrompts.SystemPrompt, todoIds = new string[0] }), new ChatLanguageRequest()));
+            string directory = Path.Combine(root, "chat-invalid-output");
+            var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => data.Items.Add(new Todo { Title = "准备答辩", Date = "2026-09-10", Time = "16:00" }));
+            var secret = new SecretStore(directory); secret.Save("sk-testkey");
+            var history = new ChatHistoryStore(directory); var agent = new FakeChatAgent { Answer = "{\"choices\":[\"private-envelope\"]}" };
+            var service = new ChatAssistantService(controller, secret, agent, null, null, history);
+            Check(service.Handle("今天要做什么", new DateTime(2026, 9, 10, 9, 0, 0)).Text.Contains("准备答辩"), "Malformed reply lost local facts");
+            agent.Answer = json.Serialize(new { answer = "先准备答辩。密钥 sk-testkey", todoIds = new string[0] });
+            ChatMessage result = service.Handle("今天要做什么", new DateTime(2026, 9, 10, 9, 1, 0));
+            Check(result.Text.Contains("先准备答辩") && !File.ReadAllText(history.FilePath).Contains("sk-testkey"), "Validated answer lost meaning or exposed key");
+            string payload = ChatLanguagePrompts.BuildPayload(agent.Request, "test-model");
+            var shape = json.Deserialize<Dictionary<string, object>>(payload);
+            var format = (Dictionary<string, object>)((Dictionary<string, object>)shape["text"])["format"];
+            var schema = (Dictionary<string, object>)format["schema"];
+            Check((string)format["type"] == "json_schema" && !(bool)schema["additionalProperties"] && !(bool)shape["store"] && !shape.ContainsKey("tools"), "Chat transport omitted strict schema or enabled tool/storage capability");
+        });
+        foreach (string invalidJson in new[] {
+            "{'answer':'private-invalid','todoIds':[]}", "{answer:\"private-invalid\",todoIds:[]}",
+            "{\"answer\":\"private-invalid\",\"answer\":\"second\",\"todoIds\":[]}",
+            "{\"answer\":\"private-invalid\",\"\\u0061nswer\":\"second\",\"todoIds\":[]}",
+            "{\"answer\":\"private-invalid\",\"todoIds\":[],}", "{\"answer\":\"private-invalid\",\"todoIds\":[\"id\",]}",
+            "/*comment*/{\"answer\":\"private-invalid\",\"todoIds\":[]}",
+            "{\"answer\":\"private-invalid\",/*comment*/\"todoIds\":[]}",
+            "{\"answer\":\"private-invalid\",\"todoIds\":[]} trailing", "{\"answer\":\"private-invalid\",\"todoIds\":[]}{}",
+            "{\"answer\":\"bad\\x41\",\"todoIds\":[]}", "{\"answer\":\"line\nbreak\",\"todoIds\":[]}"
+        }) {
+            string malformed = invalidJson;
+            Test("chat strict JSON rejects " + malformed.Replace('\n', ' '), delegate {
+                Throws(() => ChatLanguageReplies.Parse(malformed, new ChatLanguageRequest()));
+            });
+        }
+        Test("chat strict JSON accepts valid escapes and malformed syntax falls back without persistence", delegate {
+            ChatLanguageReply escaped = ChatLanguageReplies.Parse(" \r\n{\"answer\":\"中文 \\u4e2d \\uD83D\\uDE00 \\\"引号\\\" \\\\ 路径\\/末尾\\t制表\",\"todoIds\":[]} \t", new ChatLanguageRequest());
+            Check(escaped.Answer == "中文 中 😀 \"引号\" \\ 路径/末尾\t制表", "Valid escaped JSON changed meaning");
+            string directory = Path.Combine(root, "chat-strict-fallback");
+            var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => data.Items.Add(new Todo { Title = "核对资料", Date = "2026-09-10", Time = "15:00" }));
+            var secret = new SecretStore(directory); secret.Save("sk-testkey"); var history = new ChatHistoryStore(directory);
+            var agent = new FakeChatAgent { Answer = "{'answer':'private-invalid-syntax','todoIds':[]}" };
+            ChatMessage response = new ChatAssistantService(controller, secret, agent, null, null, history).Handle("今天要做什么", new DateTime(2026, 9, 10, 9, 0, 0));
+            Check(response.Text.Contains("核对资料") && !File.ReadAllText(history.FilePath).Contains("private-invalid-syntax"), "Invalid syntax replaced local facts or reached history");
+        });
+        Test("chat failed sync returns safe retry guidance and preserves history", delegate {
+            string directory = Path.Combine(root, "chat-sync-failure"); var history = new ChatHistoryStore(directory);
+            var service = new ChatAssistantService(new CalendarController(new CalendarStore(directory)), new SecretStore(directory), null, null, null, history);
+            ChatMessage response = service.Handle("同步邮箱", new DateTime(2026, 9, 10, 9, 0, 0));
+            Check(response.Text.Contains("未完成") && response.Sync.ErrorCount == 1 && response.Sync.CompletedAt == "" && history.Load().Messages.Count == 2, "Sync failure lost response or claimed completion");
+        });
+        Test("chat partial sync does not classify failures as ignored mail", delegate {
+            var fixture = new IncrementalMailFixture("chat-sync-partial"); fixture.Messages(43); fixture.Analyzer.FailSubject = "虚构消息 43";
+            string directory = Path.Combine(root, "chat-sync-partial"); var history = new ChatHistoryStore(directory);
+            var service = new ChatAssistantService(new CalendarController(new CalendarStore(directory)), new SecretStore(directory), null, fixture.Sync, fixture.StateStore, history);
+            ChatMessage response = service.Handle("读取新邮件", fixture.Now);
+            Check(response.Text.Contains("部分完成") && response.Sync.ErrorCount == 1 && response.Sync.IgnoredCount == 0, "Failed messages were reported as ignored");
+            Check(response.Sync.Folders.Single().FinalUid == 42 && response.Sync.Folders.Single().CompletedAt == "", "Failed folder cursor advanced");
+            Check(!File.ReadAllText(history.FilePath).Contains("private-body") && !response.Text.Contains("private-sender"), "Partial failure persisted private exception text");
+        });
         Test("v2 calendar upgrades without treating legacy completed work as newly completed", delegate {
             string json = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new {
                 Version = 2, ReminderTime = "19:00", Sound = true,
@@ -202,6 +417,210 @@ internal static class CalendarTests
             Check(notices != null, "Calendar data has no opportunity notification collection");
             object value = notices.GetValue(new CalendarData(), null);
             Check(value is System.Collections.IList, "Opportunity notification collection is not initialized");
+        });
+        Test("chat history retains the newest fifty messages in chronological order", delegate {
+            var store = new ChatHistoryStore(Path.Combine(root, "chat-retention"));
+            var expectedIds = new List<string>();
+            for (int index = 1; index <= 55; index++) {
+                string id = Guid.NewGuid().ToString("N"); expectedIds.Add(id);
+                store.Append(ChatMessage.CreateSafeDisplay(id, index % 2 == 0 ? "assistant" : "user", "message " + index,
+                    new DateTimeOffset(2026, 9, 10, 8, index, 0, TimeSpan.FromHours(8)).ToString("o", CultureInfo.InvariantCulture)));
+            }
+            ChatHistory history = store.Load();
+            Check(history.Version == 1 && history.Messages.Count == 50, "Chat history did not retain exactly fifty messages");
+            for (int index = 0; index < history.Messages.Count; index++) {
+                int expected = index + 6;
+                Check(history.Messages[index].Id == expectedIds[expected - 1],
+                    "Chat history did not preserve chronological retention at message " + expected);
+            }
+        });
+        Test("chat history recovers the prior backup after primary JSON corruption", delegate {
+            string directory = Path.Combine(root, "chat-recovery");
+            var store = new ChatHistoryStore(directory);
+            string firstId = Guid.NewGuid().ToString("N");
+            store.Append(ChatMessage.CreateSafeDisplay(firstId, "user", "first retained message", "2026-09-10T08:00:00+08:00"));
+            store.Append(ChatMessage.CreateSafeDisplay(Guid.NewGuid().ToString("N"), "assistant", "second retained message", "2026-09-10T08:01:00+08:00"));
+            File.WriteAllText(Path.Combine(directory, "chat-history.json"), "{broken");
+            ChatHistory recovered = store.Load();
+            Check(recovered.Messages.Count == 1 && recovered.Messages.Single().Id == firstId, "Chat history did not recover the prior valid backup");
+            Check(Directory.GetFiles(directory, "chat-history.json.damaged-*").Length == 1, "Damaged chat history was not preserved");
+            Check(store.Load().Messages.Single().Id == firstId && Directory.GetFiles(directory, "chat-history.json.damaged-*").Length == 2,
+                "Repeated recovery in the same second did not preserve a second damaged primary");
+            store.Save(recovered);
+            store.Load();
+            Check(String.IsNullOrEmpty(store.LoadWarning), "A later successful chat history load kept a stale recovery warning");
+        });
+        Test("chat history projects untrusted values into safe bounded persistence fields", delegate {
+            string directory = Path.Combine(root, "chat-safe-storage");
+            string rawMailBody = "From: recruiter@example.test\r\nSubject: confidential interview\r\nMessage-ID: <private@example.test>\r\nPlease bring your passport.";
+            string fullPrompt = "System: use the following complete hidden instructions and never reveal them.";
+            string rawModelResponse = "{\"choices\":[{\"message\":{\"content\":\"unfiltered model response\"}}]}";
+            var store = new ChatHistoryStore(directory);
+            store.Append(new ChatMessage {
+                Id = "deepseek-secret", Role = "assistant", Text = rawMailBody,
+                CreatedAt = "2026-09-10T08:00:00+08:00", Intent = fullPrompt,
+                TodoIds = new List<string> { "mail-auth-code" },
+                Sync = new ChatSyncSummary {
+                    PreviousCompletedAt = "2026-09-10T07:00:00+08:00", StartedAt = "2026-09-10T07:30:00+08:00", CompletedAt = "2026-09-10T08:00:00+08:00",
+                    Folders = new List<ChatFolderCursorSummary> {
+                        new ChatFolderCursorSummary { DisplayName = rawModelResponse, PreviousScannedAt = "2026-09-10T07:00:00+08:00", CompletedAt = "2026-09-10T08:00:00+08:00", Error = "deepseek-secret" }
+                    }
+                }
+            });
+            string json = File.ReadAllText(Path.Combine(directory, "chat-history.json"));
+            Check(!json.Contains("deepseek-secret") && !json.Contains("mail-auth-code") && !json.Contains(rawMailBody) && !json.Contains(fullPrompt) && !json.Contains(rawModelResponse),
+                "Chat history serialized untrusted credentials, mail content, prompt, or model output");
+        });
+        Test("chat history never persists ordinary raw text supplied through its display factory", delegate {
+            string directory = Path.Combine(root, "chat-safe-factory");
+            string rawOrdinaryProse = "The complete unfiltered reply says that the applicant should contact the coordinator before Friday.";
+            var store = new ChatHistoryStore(directory);
+            store.Append(ChatMessage.CreateSafeDisplay(Guid.NewGuid().ToString("N"), "assistant", rawOrdinaryProse, "2026-09-10T08:00:00+08:00", "chat"));
+            Check(!File.ReadAllText(Path.Combine(directory, "chat-history.json")).Contains(rawOrdinaryProse),
+                "Chat display factory allowed ordinary raw prose into persistence");
+        });
+        Test("chat history reprojects legacy raw JSON before returning or saving it", delegate {
+            string directory = Path.Combine(root, "chat-legacy-projection");
+            string rawOrdinaryProse = "The complete ordinary mail prose asks the applicant to join a private interview meeting on Friday.";
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, "chat-history.json"), new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(new {
+                Version = 1,
+                Messages = new[] { new { Id = Guid.NewGuid().ToString("N"), Role = "assistant", Text = rawOrdinaryProse, CreatedAt = "2026-09-10T08:00:00+08:00", Intent = "chat" } }
+            }));
+            var store = new ChatHistoryStore(directory);
+            ChatHistory history = store.Load();
+            Check(history.Messages.Single().Text != rawOrdinaryProse, "Legacy raw JSON was trusted as display content during load");
+            store.Save(history);
+            Check(!File.ReadAllText(Path.Combine(directory, "chat-history.json")).Contains(rawOrdinaryProse),
+                "Legacy raw JSON was written back as trusted display content");
+        });
+        Test("chat history rejects invalid roles, normalizes timestamps, and clears stored messages", delegate {
+            string directory = Path.Combine(root, "chat-validation");
+            var store = new ChatHistoryStore(directory);
+            Throws(delegate { store.Append(new ChatMessage { Id = "invalid", Role = "tool", Text = "not allowed", CreatedAt = "2026-09-10T08:00:00+08:00" }); });
+            store.Append(ChatMessage.CreateSafeDisplay(Guid.NewGuid().ToString("N"), "system", "allowed", "2026-09-10 08:00:00 +08:00"));
+            ChatMessage message = store.Load().Messages.Single();
+            DateTimeOffset timestamp;
+            Check(DateTimeOffset.TryParse(message.CreatedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out timestamp) && message.CreatedAt == timestamp.ToString("o", CultureInfo.InvariantCulture),
+                "Chat timestamp was not normalized to an ISO 8601 offset value");
+            store.Clear();
+            Check(store.Load().Messages.Count == 0, "Chat history clear did not persist an empty history");
+        });
+        Test("chat history normalizes sync cursor timestamps with offsets", delegate {
+            var store = new ChatHistoryStore(Path.Combine(root, "chat-sync-timestamps"));
+            store.Append(ChatMessage.CreateSafeDisplay(Guid.NewGuid().ToString("N"), "assistant", "同步完成", "2026-09-10T08:00:00+08:00", sync: new ChatSyncSummary {
+                    PreviousCompletedAt = "2026-09-10 07:00:00 +08:00", StartedAt = "2026-09-10 07:55:00 +08:00", CompletedAt = "2026-09-10 08:00:00 +08:00",
+                    Folders = new List<ChatFolderCursorSummary> {
+                        new ChatFolderCursorSummary { DisplayName = "收件箱", PreviousScannedAt = "2026-09-10 07:30:00 +08:00", CompletedAt = "2026-09-10 08:00:00 +08:00" }
+                    }
+                }));
+            ChatSyncSummary sync = store.Load().Messages.Single().Sync;
+            Func<string, bool> isNormalizedTimestamp = delegate(string value) {
+                DateTimeOffset timestamp;
+                return DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out timestamp) && value == timestamp.ToString("o", CultureInfo.InvariantCulture);
+            };
+            Check(isNormalizedTimestamp(sync.PreviousCompletedAt) && isNormalizedTimestamp(sync.StartedAt) && isNormalizedTimestamp(sync.CompletedAt) &&
+                isNormalizedTimestamp(sync.Folders.Single().PreviousScannedAt) && isNormalizedTimestamp(sync.Folders.Single().CompletedAt),
+                "Chat sync timestamps were not normalized to ISO 8601 offset values");
+        });
+        Test("chat intent router recognizes exact and natural sync and task requests", delegate {
+            ChatIntent readMail = ChatIntentRouter.Parse("读取新邮件");
+            ChatIntent naturalReadMail = ChatIntentRouter.Parse("收取一下新邮件");
+            ChatIntent syncMailbox = ChatIntentRouter.Parse("  同步 一下 邮箱  ");
+            ChatIntent naturalMailbox = ChatIntentRouter.Parse("帮我同步一下收件箱");
+            ChatIntent today = ChatIntentRouter.Parse("今天要做什么");
+            ChatIntent naturalToday = ChatIntentRouter.Parse("今天有哪些安排");
+            ChatIntent tomorrow = ChatIntentRouter.Parse("明天截止");
+            ChatIntent naturalTomorrow = ChatIntentRouter.Parse("明天有哪些截止事项");
+            ChatIntent sevenDays = ChatIntentRouter.Parse("未来 七 天");
+            ChatIntent naturalSevenDays = ChatIntentRouter.Parse("接下来一周");
+            ChatIntent mixed = ChatIntentRouter.Parse("读取新邮件，然后今天要做什么");
+            ChatIntent unrelated = ChatIntentRouter.Parse("帮我写一段自我介绍");
+            Check(readMail.Kind == ChatIntentKind.SyncMailIncremental && naturalReadMail.Kind == ChatIntentKind.SyncMailIncremental &&
+                syncMailbox.Kind == ChatIntentKind.SyncMailIncremental && naturalMailbox.Kind == ChatIntentKind.SyncMailIncremental,
+                "Explicit mailbox sync phrases were not routed to local incremental sync");
+            Check(today.Kind == ChatIntentKind.ListTasks && today.Range == TaskQueryRange.Today &&
+                naturalToday.Kind == ChatIntentKind.ListTasks && naturalToday.Range == TaskQueryRange.Today,
+                "Today's task request was not routed with the today range");
+            Check(tomorrow.Kind == ChatIntentKind.ListTasks && tomorrow.Range == TaskQueryRange.Tomorrow &&
+                naturalTomorrow.Kind == ChatIntentKind.ListTasks && naturalTomorrow.Range == TaskQueryRange.Tomorrow,
+                "Tomorrow deadline request was not routed with the tomorrow range");
+            Check(sevenDays.Kind == ChatIntentKind.ListTasks && sevenDays.Range == TaskQueryRange.SevenDays &&
+                naturalSevenDays.Kind == ChatIntentKind.ListTasks && naturalSevenDays.Range == TaskQueryRange.SevenDays,
+                "Future seven-day request was not routed with the seven-day range");
+            Check(mixed.Kind == ChatIntentKind.SyncMailIncremental,
+                "Explicit mailbox sync did not take precedence over a task phrase");
+            Check(unrelated.Kind == ChatIntentKind.Chat, "Unrelated text did not remain chat");
+        });
+        Test("task query uses deadline instants and excludes inactive calendar items", delegate {
+            DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
+            var data = new CalendarData();
+            data.Items.Add(new Todo { Title = "逾期截止", Date = "2026-09-10", Important = false,
+                Deadline = new DeadlineSpec { StartAt = "2026-09-09T08:00:00+08:00", Amount = 24, Unit = "hours", Confirmed = true } });
+            data.Items.Add(new Todo { Title = "今日截止", Date = "2026-09-10", Important = true,
+                Deadline = new DeadlineSpec { StartAt = "2026-09-10T06:00:00+08:00", Amount = 12, Unit = "hours", Confirmed = true } });
+            data.Items.Add(new Todo { Title = "明日普通待办", Date = "2026-09-11", Time = "09:00", Important = true });
+            data.Items.Add(new Todo { Title = "七日内跨日截止", Date = "2026-09-16", Important = false,
+                Deadline = new DeadlineSpec { StartAt = "2026-09-09T23:00:00+08:00", Amount = 168, Unit = "hours", Confirmed = true } });
+            data.Items.Add(new Todo { Title = "已完成", Date = "2026-09-10", Completed = true });
+            data.Items.Add(new Todo { Title = "已删除", Date = "2026-09-10", Deleted = true });
+            TaskQueryResult today = TaskQueryService.Query(data, now, TaskQueryRange.Today);
+            TaskQueryResult tomorrow = TaskQueryService.Query(data, now, TaskQueryRange.Tomorrow);
+            TaskQueryResult sevenDays = TaskQueryService.Query(data, now, TaskQueryRange.SevenDays);
+            Check(today.Overdue.Select(item => item.Title).SequenceEqual(new[] { "逾期截止" }),
+                "A past deadline instant was not classified as overdue");
+            Check(today.Due.Select(item => item.Title).SequenceEqual(new[] { "今日截止" }),
+                "Today's deadline instant was not included in today's due list");
+            Check(tomorrow.Due.Select(item => item.Title).SequenceEqual(new[] { "明日普通待办" }),
+                "Tomorrow's ordinary todo was not included in tomorrow's due list");
+            Check(sevenDays.Due.Select(item => item.Title).SequenceEqual(new[] { "今日截止", "明日普通待办", "七日内跨日截止" }),
+                "Seven-day query did not use the deadline end date or deterministic due ordering");
+            Check(!sevenDays.Overdue.Concat(sevenDays.Due).Any(item => item.Title == "已完成" || item.Title == "已删除"),
+                "Completed or deleted items leaked into the local task query");
+            Check(sevenDays.DeterministicText.Contains("逾期截止") && sevenDays.DeterministicText.Contains("七日内跨日截止"),
+                "Task query did not create deterministic local result text");
+        });
+        Test("task query keeps a deadline at the current instant in the due list", delegate {
+            DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
+            var data = new CalendarData();
+            data.Items.Add(new Todo { Title = "恰好截止", Date = "2026-09-10",
+                Deadline = new DeadlineSpec { StartAt = "2026-09-10T11:00:00+08:00", Amount = 1, Unit = "hours", Confirmed = true } });
+            TaskQueryResult result = TaskQueryService.Query(data, now, TaskQueryRange.Today);
+            Check(result.Overdue.Count == 0 && result.Due.Select(item => item.Title).SequenceEqual(new[] { "恰好截止" }),
+                "A deadline equal to the current instant was incorrectly classified as overdue");
+        });
+        Test("task query uses ordinary todo times without expiring all-day today items", delegate {
+            DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
+            var data = new CalendarData();
+            data.Items.Add(new Todo { Title = "今天较早定时", Date = "2026-09-10", Time = "09:00" });
+            data.Items.Add(new Todo { Title = "今天较晚定时", Date = "2026-09-10", Time = "15:00" });
+            data.Items.Add(new Todo { Title = "今天全天", Date = "2026-09-10", Time = "" });
+            TaskQueryResult result = TaskQueryService.Query(data, now, TaskQueryRange.Today);
+            Check(result.Overdue.Select(item => item.Title).SequenceEqual(new[] { "今天较早定时" }),
+                "A timed ordinary todo before now was not classified as overdue");
+            Check(result.Due.Select(item => item.Title).SequenceEqual(new[] { "今天全天", "今天较晚定时" }),
+                "Future timed or all-day ordinary todos today were not kept in the due list");
+        });
+        Test("task query caps model-facing items after deterministic overdue ordering", delegate {
+            DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
+            var data = new CalendarData();
+            for (int index = 0; index < 51; index++)
+                data.Items.Add(new Todo { Title = "普通任务 " + index.ToString("D2"), Date = "2026-09-10", Important = index == 50 });
+            data.Items.Add(new Todo { Title = "逾期任务", Date = "2026-09-10",
+                Deadline = new DeadlineSpec { StartAt = "2026-09-09T08:00:00+08:00", Amount = 24, Unit = "hours", Confirmed = true } });
+            TaskQueryResult result = TaskQueryService.Query(data, now, TaskQueryRange.Today);
+            Check(result.Overdue.Count == 1 && result.Due.Count == 49, "Task query did not cap combined model-facing items at fifty");
+            Check(result.Overdue.Single().Title == "逾期任务" && result.Due.First().Title == "普通任务 50",
+                "Task query did not keep overdue status, importance, and title ordering deterministic");
+        });
+        Test("task query caps tied items by ordinal todo identifier instead of storage order", delegate {
+            DateTime now = new DateTime(2026, 9, 10, 12, 0, 0);
+            var data = new CalendarData();
+            for (int index = 50; index >= 0; index--)
+                data.Items.Add(new Todo { Id = "task-" + index.ToString("D2"), Title = "同名同日任务", Date = "2026-09-10" });
+            TaskQueryResult result = TaskQueryService.Query(data, now, TaskQueryRange.Today);
+            Check(result.Due.Count == 50 && result.Due.First().Id == "task-00" && result.Due.Last().Id == "task-49",
+                "The fifty-item cap depended on input storage order when due, importance, and title tied");
         });
         Test("mail sync state recovers its backup and never contains the authorization code", delegate {
             string directory = Path.Combine(root, "mail-state");
@@ -321,11 +740,19 @@ internal static class CalendarTests
             Check(!fallback.Deadline.Confirmed && fallback.EmailSource.DeadlineInferred, "Fallback deadline was not marked inferred");
             Throws(delegate { MailActionParser.Parse("{\"actionable\":true,\"title\":\"missing fields\"}"); });
         });
-        Test("mail classification request disables DeepSeek thinking while summaries keep it enabled", delegate {
+        Test("structured JSON requests disable DeepSeek thinking so reasoning cannot consume the final answer budget", delegate {
             string mailJson = DeepSeekRequestPayload.Build("deepseek-v4-flash", "system", "mail", 1200, true);
-            string summaryJson = DeepSeekRequestPayload.Build("deepseek-v4-flash", "system", "summary", 1000, false);
+            string summaryJson = DeepSeekRequestPayload.Build("deepseek-v4-flash", "system", "summary", 1000);
             Check(mailJson.Contains("\"thinking\":{\"type\":\"disabled\"}"), "Mail classification still uses slow thinking mode");
-            Check(summaryJson.Contains("\"thinking\":{\"type\":\"enabled\"}"), "Summary thinking mode changed unexpectedly");
+            Check(summaryJson.Contains("\"thinking\":{\"type\":\"disabled\"}"), "Summary can still spend its output budget on hidden reasoning");
+        });
+        Test("chat completion diagnostics distinguish a truncated empty answer from malformed JSON", delegate {
+            string completed = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"{\\\"overview\\\":\\\"ok\\\"}\"}}]}";
+            Check(DeepSeekCompletions.ExtractContent(completed) == "{\"overview\":\"ok\"}", "Completed DeepSeek content was not extracted");
+            string message = "";
+            try { DeepSeekCompletions.ExtractContent("{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":\"{\\\"overview\\\":\\\"partial\\\"}\",\"reasoning_content\":\"private reasoning\"}}]}"); }
+            catch (InvalidDataException error) { message = error.Message; }
+            Check(message.Contains("长度限制") && !message.Contains("private reasoning"), "Empty truncated completion did not produce a safe actionable diagnostic");
         });
         Test("structured mail request requires every action field and disables reasoning", delegate {
             string payload = DeepSeekStructuredPayload.BuildMailAction("deepseek-v4-flash", "extract", "mail input", 1200);
@@ -399,6 +826,164 @@ internal static class CalendarTests
             MailSyncResult result = sync.Run(false, 3);
             Check(factory.Client.Requests.Single().Since == now.AddDays(-3) && factory.Client.Requests.Single().MinimumUid == 0, "Manual window leaked into all historical UIDs");
             Check(result.CreatedCount == 1 && factory.Client.KeepAliveCalls > 0, "Manual rescan did not reanalyze or keep the mailbox alive");
+        });
+        Test("chat incremental requests the next UID and commits cursor diagnostics only after processing", delegate {
+            var fixture = new IncrementalMailFixture("chat-incremental-cursor"); fixture.Messages(44, 43);
+            fixture.Analyzer.BeforeAnalyze = () => {
+                MailFolderState pending = fixture.StateStore.Load().Folders.Single();
+                Check(pending.LastUid == 42 && pending.LastScannedAt == "2026-09-10T08:00:00+08:00", "Cursor advanced before all messages succeeded");
+            };
+            MailSyncResult result = fixture.Sync.RunIncremental();
+            MailFolderSyncSummary folder = result.Folders.Single();
+            Check(fixture.Factory.Client.Requests.Single().MinimumUid == 43, "Incremental fetch did not request UID 43");
+            Check(folder.DisplayName == "收件箱" && folder.PreviousUid == 42 && folder.RequestedMinimumUid == 43 && folder.FinalUid == 44, "Cursor diagnostic UIDs are incorrect");
+            Check(folder.PreviousScannedAt == "2026-09-10T08:00:00+08:00" && DateTimeOffset.Parse(folder.CompletedAt) == new DateTimeOffset(fixture.Now), "Cursor diagnostic timestamps are incorrect");
+            Check(folder.FetchedCount == 2 && String.IsNullOrEmpty(folder.Error) && result.ScannedCount == 2, "Successful folder diagnostics are incorrect");
+            MailFolderState saved = fixture.StateStore.Load().Folders.Single();
+            Check(saved.LastUid == 44 && saved.LastScannedAt == folder.CompletedAt, "Successful cursor was not persisted");
+        });
+        Test("folder summaries project sensitive and custom labels to a neutral safe name", delegate {
+            string[] labels = { "fictional-sync@163.com", "mail-secret", "deep-secret", "<fictional-id@example.invalid>", "private subject and sender", "收件箱\r\nmail-secret", "My custom hiring folder" };
+            for (int index = 0; index < labels.Length; index++) {
+                var fixture = new IncrementalMailFixture("chat-safe-label-" + index);
+                fixture.Factory.Client.Folders.Single().DisplayName = labels[index];
+                MailFolderSyncSummary summary = fixture.Sync.RunIncremental().Folders.Single();
+                Check(summary.DisplayName == "邮箱文件夹", "Server-controlled label escaped the safe projection");
+                string serialized = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(summary);
+                Check(!serialized.Contains(labels[index]), "Folder summary serialized a sensitive label");
+            }
+        });
+        Test("folder summaries preserve only allowlisted generic names", delegate {
+            string[] labels = { "INBOX", "收件箱", "junk", "垃圾邮件", "广告邮件", "订阅邮件" };
+            string[] expected = { "收件箱", "收件箱", "垃圾邮件", "垃圾邮件", "广告邮件", "订阅邮件" };
+            for (int index = 0; index < labels.Length; index++) {
+                var fixture = new IncrementalMailFixture("chat-known-label-" + index);
+                fixture.Factory.Client.Folders.Single().DisplayName = labels[index];
+                Check(fixture.Sync.RunIncremental().Folders.Single().DisplayName == expected[index], "Generic folder label was not normalized");
+            }
+        });
+        Test("incremental first sync uses saved window or seven day default without changing automatic schedule", delegate {
+            foreach (int days in new[] { 7, 14 }) {
+                var fixture = new IncrementalMailFixture("chat-initial-" + days);
+                MailSyncState state = fixture.StateStore.Load(); state.Folders.Clear(); state.Account.ManualSyncDays = days; state.LastAutomaticDate = "2026-09-09"; fixture.StateStore.Save(state);
+                MailSyncResult result = fixture.Sync.RunIncremental();
+                Check(fixture.Factory.Client.Requests.Single().MinimumUid == 0 && fixture.Factory.Client.Requests.Single().Since == fixture.Now.AddDays(-days), "Initial recovery window is incorrect");
+                Check(result.Folders.Single().PreviousUid == 0 && fixture.StateStore.Load().LastAutomaticDate == "2026-09-09", "Chat sync changed the automatic schedule");
+            }
+            var automatic = new IncrementalMailFixture("auto-initial", 0);
+            automatic.Sync.Run(true);
+            Check(automatic.Factory.Client.Requests.Single().Since == automatic.Now.AddDays(-7), "Automatic initial scan did not use the recovery window");
+        });
+        Test("UIDVALIDITY change resets to seven day recovery and reports both cursor generations", delegate {
+            var fixture = new IncrementalMailFixture("chat-validity-reset", 42, 6); fixture.Messages(2);
+            MailFolderSyncSummary summary = fixture.Sync.RunIncremental().Folders.Single();
+            Check(fixture.Factory.Client.Requests.Single().MinimumUid == 0 && fixture.Factory.Client.Requests.Single().Since == fixture.Now.AddDays(-7), "UIDVALIDITY reset did not request a recovery scan");
+            Check(summary.PreviousUid == 42 && summary.RequestedMinimumUid == 0 && summary.FinalUid == 2, "Reset diagnostics lost the prior or new cursor");
+            Check(fixture.StateStore.Load().Folders.Single().UidValidity == 7 && fixture.StateStore.Load().Folders.Single().LastUid == 2, "Reset cursor was not saved in the new generation");
+        });
+        Test("failed incremental message leaves the entire folder retryable and suppresses private error details", delegate {
+            var fixture = new IncrementalMailFixture("chat-message-failure"); fixture.Messages(43, 44, 45); fixture.Analyzer.FailSubject = "虚构消息 44";
+            MailFolderSyncSummary summary = fixture.Sync.RunIncremental().Folders.Single();
+            MailFolderState saved = fixture.StateStore.Load().Folders.Single();
+            Check(saved.LastUid == 42 && saved.LastScannedAt == "2026-09-10T08:00:00+08:00", "Failure advanced the persisted cursor or success timestamp");
+            Check(summary.FinalUid == 42 && summary.FetchedCount == 3 && String.IsNullOrEmpty(summary.CompletedAt) && !String.IsNullOrEmpty(summary.Error), "Partial failure diagnostics claim success");
+            string serialized = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(summary);
+            foreach (string sensitive in new[] { "private-body", "private-sender", "private-id", "mail-secret", "deep-secret", "虚构消息", "fictional-sync", "fictional-sender" })
+                Check(!serialized.Contains(sensitive), "Folder summary leaked private message or exception data");
+            fixture.Analyzer.FailSubject = null;
+            MailSyncResult retried = fixture.Sync.RunIncremental();
+            Check(fixture.Factory.Client.Requests.Last().MinimumUid == 43 && fixture.StateStore.Load().Folders.Single().LastUid == 45, "Failed message could not be retried");
+            Check(fixture.Analyzer.Calls == 4 && retried.Errors.Count == 0, "Incremental retry reanalyzed successful messages or skipped the failure");
+        });
+        Test("failed recovery preserves the committed generation and retries the recovery window", delegate {
+            var fixture = new IncrementalMailFixture("chat-reset-failure", 42, 6); fixture.Messages(2, 3); fixture.Analyzer.FailSubject = "虚构消息 2";
+            MailFolderSyncSummary failedFolder = fixture.Sync.RunIncremental().Folders.Single();
+            Check(failedFolder.PreviousUid == 42 && failedFolder.FinalUid == 42 && fixture.StateStore.Load().Folders.Single().UidValidity == 6, "Failed recovery replaced the committed generation");
+            fixture.Analyzer.FailSubject = null; fixture.Sync.RunIncremental();
+            Check(fixture.Factory.Client.Requests.Last().MinimumUid == 0 && fixture.StateStore.Load().Folders.Single().LastUid == 3, "Failed recovery was not retryable");
+        });
+        Test("opened folder generation overrides discovery before constructing an incremental query", delegate {
+            foreach (uint discovered in new uint[] { 7, 0 }) {
+                var fixture = new IncrementalMailFixture("chat-open-generation-" + discovered); fixture.Messages(1, 2);
+                fixture.Factory.Client.Folders.Single().UidValidity = discovered;
+                fixture.Factory.Client.OpenedUidValidity = 8;
+                foreach (MailMessageSnapshot message in fixture.Factory.Client.Messages["INBOX"]) message.UidValidity = 8;
+                fixture.Analyzer.BeforeAnalyze = () => {
+                    MailFolderState pending = fixture.StateStore.Load().Folders.Single();
+                    Check(pending.UidValidity == 7 && pending.LastUid == 42, "Recovery generation was committed before processing finished");
+                };
+                MailSyncResult result = fixture.Sync.RunIncremental();
+                MailFetchRequest request = fixture.Factory.Client.Requests.Single();
+                Check(request.MinimumUid == 0 && request.Since == fixture.Now.AddDays(-7), "Old UID cursor was applied to a newly opened generation");
+                Check(result.ScannedCount == 2 && result.Errors.Count == 0 && fixture.StateStore.Load().Folders.Single().UidValidity == 8 && fixture.StateStore.Load().Folders.Single().LastUid == 2, "New generation messages were silently missed");
+                MailFolderSyncSummary summary = result.Folders.Single();
+                Check(summary.PreviousUidValidity == 7 && summary.AttemptedUidValidity == 8 && summary.FinalUidValidity == 8, "Recovery summary lost its generation diagnostics");
+            }
+        });
+        Test("unavailable opened UIDVALIDITY fails retryably without issuing an old cursor query", delegate {
+            foreach (uint discovered in new uint[] { 7, 0 }) {
+                var fixture = new IncrementalMailFixture("chat-open-unavailable-" + discovered);
+                fixture.Factory.Client.Folders.Single().UidValidity = discovered; fixture.Factory.Client.OpenedUidValidity = 0;
+                MailSyncResult result = fixture.Sync.RunIncremental();
+                MailFolderState saved = fixture.StateStore.Load().Folders.Single();
+                Check(fixture.Factory.Client.Requests.Count == 0 && result.Errors.Count == 1 && !String.IsNullOrEmpty(result.Folders.Single().Error), "Unavailable UIDVALIDITY issued a query or claimed success");
+                Check(saved.LastUid == 42 && saved.UidValidity == 7 && saved.LastScannedAt == "2026-09-10T08:00:00+08:00" && String.IsNullOrEmpty(result.Folders.Single().CompletedAt), "Unavailable generation changed the committed cursor");
+                fixture.Factory.Client.OpenedUidValidity = 7; fixture.Sync.RunIncremental();
+                Check(fixture.Factory.Client.Requests.Single().MinimumUid == 43, "Unverified generation failure was not retryable");
+            }
+        });
+        Test("failed opened-generation recovery keeps the old cursor until a successful saved-window retry", delegate {
+            var fixture = new IncrementalMailFixture("chat-open-recovery-failure"); fixture.Messages(1, 2); fixture.Factory.Client.OpenedUidValidity = 8;
+            foreach (MailMessageSnapshot message in fixture.Factory.Client.Messages["INBOX"]) message.UidValidity = 8;
+            MailSyncState initial = fixture.StateStore.Load(); initial.Account.ManualSyncDays = 14; fixture.StateStore.Save(initial);
+            fixture.Analyzer.FailSubject = "虚构消息 1";
+            MailSyncResult first = fixture.Sync.RunIncremental();
+            MailFolderState failedCursor = fixture.StateStore.Load().Folders.Single();
+            Check(first.Errors.Count == 1 && failedCursor.UidValidity == 7 && failedCursor.LastUid == 42 && first.Folders.Single().FinalUid == 42, "Failed recovery published an uncommitted generation or skipped its messages");
+            Check(first.Folders.Single().PreviousUidValidity == 7 && first.Folders.Single().AttemptedUidValidity == 8 && first.Folders.Single().FinalUidValidity == 7, "Failed recovery summary claimed a committed replacement generation");
+            fixture.Analyzer.FailSubject = null; fixture.Sync.RunIncremental();
+            Check(fixture.Factory.Client.Requests.All(request => request.MinimumUid == 0 && request.Since == fixture.Now.AddDays(-14)), "Recovery retry did not reuse the saved window");
+            Check(fixture.StateStore.Load().Folders.Single().UidValidity == 8 && fixture.StateStore.Load().Folders.Single().LastUid == 2 && fixture.Analyzer.Calls == 3, "Recovery did not commit atomically after retry");
+        });
+        Test("exhausted UID cursor still validates the opened generation", delegate {
+            var fixture = new IncrementalMailFixture("chat-open-exhausted", UInt32.MaxValue); fixture.Messages(1, 2); fixture.Factory.Client.OpenedUidValidity = 8;
+            foreach (MailMessageSnapshot message in fixture.Factory.Client.Messages["INBOX"]) message.UidValidity = 8;
+            Check(fixture.Sync.RunIncremental().ScannedCount == 2 && fixture.Factory.Client.Requests.Single().MinimumUid == 0, "Exhaustion bypassed actual generation validation");
+        });
+        Test("client query policy rejects a stale or unavailable opened generation before search", delegate {
+            var request = new MailFetchRequest { UidValidity = 7, MinimumUid = 43, Since = new DateTime(2026, 9, 3) };
+            Throws(() => MailSearchPolicy.CreateQuery(request, 8));
+            Throws(() => MailSearchPolicy.CreateQuery(request, 0));
+            Check(MailSearchPolicy.CreateQuery(request, 7).Term == MailKit.Search.SearchTerm.Uid, "Validated generation lost its incremental query");
+            request.UidValidity = 0;
+            Throws(() => MailSearchPolicy.CreateQuery(request, 7));
+        });
+        Test("folder fetch failure reports safe cursor diagnostics and preserves the last successful scan", delegate {
+            var fixture = new IncrementalMailFixture("chat-fetch-failure"); fixture.Factory.Client.FailFolder = "INBOX";
+            MailFolderSyncSummary summary = fixture.Sync.RunIncremental().Folders.Single();
+            Check(summary.PreviousUid == 42 && summary.FinalUid == 42 && summary.RequestedMinimumUid == 43 && summary.FetchedCount == 0, "Failed fetch cursor diagnostics are incorrect");
+            Check(!String.IsNullOrEmpty(summary.Error) && String.IsNullOrEmpty(summary.CompletedAt) && fixture.StateStore.Load().Folders.Single().LastScannedAt == summary.PreviousScannedAt, "Failed fetch changed completion state");
+        });
+        Test("UID incremental search does not exclude delayed mail with old delivery dates", delegate {
+            var request = new MailFetchRequest { MinimumUid = 43, Since = new DateTime(2026, 9, 8) };
+            Check(MailSearchPolicy.CreateQuery(request).Term == MailKit.Search.SearchTerm.Uid, "Incremental query still filters by delivery date");
+            request.MinimumUid = 0;
+            Check(MailSearchPolicy.CreateQuery(request).Term == MailKit.Search.SearchTerm.DeliveredAfter, "Manual and recovery searches lost their date window");
+        });
+        Test("incremental UID exhaustion never falls back to a window rescan", delegate {
+            var fixture = new IncrementalMailFixture("chat-exhausted-cursor", UInt32.MaxValue);
+            MailFolderSyncSummary summary = fixture.Sync.RunIncremental().Folders.Single();
+            Check(fixture.Factory.Client.Requests.Count == 0 && summary.FinalUid == UInt32.MaxValue && summary.FetchedCount == 0, "Exhausted cursor triggered a date-window rescan");
+            Check(!String.IsNullOrEmpty(summary.CompletedAt) && String.IsNullOrEmpty(summary.Error), "Exhausted cursor was not reported as up to date");
+            fixture.Factory.Client.Folders.Single().UidValidity = 8;
+            fixture.Sync.RunIncremental();
+            Check(fixture.Factory.Client.Requests.Single().MinimumUid == 0 && fixture.StateStore.Load().Folders.Single().LastUid == 0, "Exhausted cursor prevented UIDVALIDITY recovery");
+        });
+        Test("strict incremental ignores server range results at or below the committed UID", delegate {
+            var fixture = new IncrementalMailFixture("chat-old-uid-result"); fixture.Messages(42, 43);
+            MailSyncResult result = fixture.Sync.RunIncremental();
+            Check(fixture.Analyzer.Calls == 1 && result.ScannedCount == 1 && result.Folders.Single().FetchedCount == 2, "Strict incremental reanalyzed a UID at or below the cursor");
+            Check(result.Folders.Single().FinalUid == 43, "New UID was not committed");
         });
         Test("one folder failure preserves successful mail work and reports a partial result", delegate {
             string directory = Path.Combine(root, "mail-partial-folder"); var controller = new CalendarController(new CalendarStore(directory)); var stateStore = new MailStateStore(directory);
@@ -515,12 +1100,27 @@ internal static class CalendarTests
             Throws(delegate { AgentSummaries.Parse("{\"overview\":\"缺少列表\"}"); });
             Throws(delegate { AgentSummaries.Parse("not json"); });
         });
+        Test("agent card projection turns long model output into a compact priority brief", delegate {
+            var summary = new AgentSummary {
+                Overview = new string('长', 500),
+                Today = new List<string> { "完成在线测评", "确认面试链接" },
+                Upcoming = new List<string> { "准备群面", "整理项目经历" },
+                Risks = new List<string> { "在线测评将在 24 小时内截止", "面试时间待确认" }
+            };
+            AgentCardProjection view = AgentCardProjection.From(summary);
+            Check(view.Headline == "今天有 2 项需要优先处理", "Agent card headline did not foreground today's workload");
+            Check(view.Priorities.SequenceEqual(new[] { "完成在线测评", "确认面试链接", "准备群面" }), "Agent card did not limit priorities to three useful rows");
+            Check(view.Risk == "在线测评将在 24 小时内截止", "Agent card did not surface the first risk");
+            Check(!view.Headline.Contains("长") && view.Priorities.All(x => !x.Contains("长")), "Long overview leaked into the compact card");
+        });
         Test("daily agent runs once after configured time and never when disabled", delegate {
             var settings = new AgentSettings { Enabled = true, DailyTime = "09:00", LastAutomaticDate = "" };
             Check(!AgentSchedule.IsDue(settings, new DateTime(2026, 9, 7, 8, 59, 59)), "Agent ran before configured time");
             Check(AgentSchedule.IsDue(settings, new DateTime(2026, 9, 7, 9, 0, 0)), "Agent missed configured time");
-            settings.LastAutomaticDate = "2026-09-07";
+            settings.LastAutomaticDate = "2026-09-07"; settings.LastSummaryAt = "2026-09-07T09:00:00+08:00";
             Check(!AgentSchedule.IsDue(settings, new DateTime(2026, 9, 7, 18, 0, 0)), "Agent ran twice in one day");
+            settings.LastSummaryAt = "2026-09-06T10:03:00+08:00";
+            Check(AgentSchedule.IsDue(settings, new DateTime(2026, 9, 7, 18, 0, 0)), "Legacy failed run with yesterday's cached summary remained blocked all day");
             settings.Enabled = false; settings.LastAutomaticDate = "";
             Check(!AgentSchedule.IsDue(settings, new DateTime(2026, 9, 7, 18, 0, 0)), "Disabled agent still ran");
         });
@@ -556,6 +1156,37 @@ internal static class CalendarTests
             Check(controller.Data.Agent.LastAutomaticDate == "2026-09-07" && controller.Data.Agent.LastSummary.Overview == "先准备面试", "Automatic completion was not persisted");
             Check(coordinator.Prepare(true) == null, "Completed automatic summary was scheduled again");
         });
+        Test("failed automatic summary remains retryable and records a safe stale-summary status", delegate {
+            string directory = Path.Combine(root, "agent-retry"); var controller = new CalendarController(new CalendarStore(directory));
+            controller.Commit(data => {
+                data.Agent.Enabled = true; data.Agent.DailyTime = "09:00";
+                data.Agent.LastSummaryAt = "2026-09-10T10:03:00+08:00";
+                data.Agent.LastSummary = new AgentSummary { Overview = "旧总结", Today = new List<string>(), Upcoming = new List<string>(), Risks = new List<string>() };
+            });
+            var secrets = new SecretStore(directory); secrets.Save("sk-test"); DateTime now = new DateTime(2026, 9, 11, 20, 0, 0);
+            var coordinator = new AgentCoordinator(controller, secrets, () => now);
+            AgentJob job = coordinator.Prepare(true); coordinator.Fail(job, new InvalidDataException("DeepSeek 没有返回可用内容。private payload"));
+            Check(controller.Data.Agent.LastAutomaticDate == "" && coordinator.Prepare(true) == null, "A failed automatic summary retried immediately without backoff");
+            now = now.AddMinutes(30);
+            Check(coordinator.Prepare(true) != null, "A failed automatic summary suppressed a later retry for the rest of the day");
+            Check(controller.Data.Agent.LastSummaryError.Contains("DeepSeek 没有返回可用内容") && !controller.Data.Agent.LastSummaryError.Contains("private payload"), "Failed summary status was not persisted safely");
+            Check(controller.Data.Agent.LastSummaryAttemptAt.StartsWith("2026-09-11T20:00:00"), "Failed summary attempt time was not persisted");
+        });
+        Test("cached summary card identifies stale content after the latest summary attempt failed", delegate {
+            var controller = new CalendarController(Store("agent-stale-card"));
+            controller.Commit(data => {
+                data.Agent.LastSummaryAt = "2026-09-10T10:03:00+08:00"; data.Agent.LastSummaryAttemptAt = "2026-09-11T20:00:00+08:00";
+                data.Agent.LastSummaryError = "DeepSeek 没有返回可用内容。";
+                data.Agent.LastSummary = new AgentSummary { Overview = "旧总结", Today = new List<string>(), Upcoming = new List<string>(), Risks = new List<string>() };
+            });
+            using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 11, 20, 1, 0))) {
+                runtime.ShowMain(); Pump();
+                Check(Descendants(runtime.Window).OfType<TextBlock>().Any(x => x.Text.Contains("上次整理失败") && x.Text.Contains("仍显示旧总结")), "Stale cached summary is presented as current after a failed refresh");
+                var details = new AgentSummaryWindow(controller.Data.Agent.LastSummary, controller.Data.Agent.LastSummaryAt, controller.Data.Agent.LastSummaryError);
+                try { details.Show(); Pump(); Check(Descendants(details).OfType<TextBlock>().Any(x => x.Text.Contains("上次整理失败") && x.Text.Contains("旧总结")), "Summary details present stale cached content as current"); }
+                finally { details.Close(); }
+            }
+        });
         Test("main calendar exposes a compact cached agent card and manual refresh", delegate {
             var controller = new CalendarController(Store("agent-card"));
             controller.Commit(data => {
@@ -565,7 +1196,8 @@ internal static class CalendarTests
             using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0))) {
                 runtime.ShowMain(); Pump();
                 Check(Descendants(runtime.Window).OfType<Border>().Any(x => AutomationProperties.GetName(x) == "智能整理卡片"), "Main agent card is missing");
-                Check(Descendants(runtime.Window).OfType<TextBlock>().Any(x => x.Text.Contains("今天先完成笔试")), "Cached summary is not visible");
+                Check(Descendants(runtime.Window).OfType<TextBlock>().Any(x => x.Text == "今天有 1 项需要优先处理"), "Compact workload headline is not visible");
+                Check(Descendants(runtime.Window).OfType<TextBlock>().Any(x => x.Text.Contains("1  完成笔试") && x.Text.Contains("2  准备群面")), "Priorities are not presented as a short ordered list");
                 Check(Descendants(runtime.Window).OfType<Button>().Any(x => Equals(x.Content, "立即总结")), "Manual summary action is missing");
                 Capture(runtime.Window, "agent-card.png");
             }
@@ -605,13 +1237,25 @@ internal static class CalendarTests
         Test("settings expose protected DeepSeek configuration without revealing saved key", delegate {
             string directory = Path.Combine(root, "agent-settings-ui"); var controller = new CalendarController(new CalendarStore(directory)); var secrets = new SecretStore(directory); secrets.Save("sk-never-show");
             var settings = new SettingsWindow(controller, delegate { }, secrets, new DeepSeekAgent()); string uiError = null;
-            settings.Loaded += delegate {
+            settings.ContentRendered += delegate {
                 try {
-                    Check(Find<CheckBox>(settings, x => AutomationProperties.GetName(x) == "启用每日智能整理").IsChecked == false, "Agent enabled state mismatch");
-                    Check(Find<TextBox>(settings, x => AutomationProperties.GetName(x) == "每日总结时间").Text == "09:00", "Daily summary time missing");
-                    Check(Find<TextBox>(settings, x => AutomationProperties.GetName(x) == "DeepSeek 模型").Text == "deepseek-v4-flash", "Default model missing");
-                    Check(Find<PasswordBox>(settings, x => AutomationProperties.GetName(x) == "DeepSeek API Key").Password == "", "Saved API key was revealed in the UI");
+                    Check(Descendants(settings).OfType<Grid>().Any(x => AutomationProperties.GetName(x) == "设置双栏布局"), "Settings did not use fixed navigation and content columns");
+                    Check(new[] { "提醒", "智能整理", "邮箱同步", "数据与系统" }.All(label => Descendants(settings).OfType<Button>().Any(x => AutomationProperties.GetName(x) == "设置导航 " + label)), "Settings navigation is incomplete");
+                    Find<Button>(settings, x => AutomationProperties.GetName(x) == "设置导航 智能整理").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                    CheckBox agentToggle = Descendants(settings).OfType<CheckBox>().FirstOrDefault(x => AutomationProperties.GetName(x) == "启用每日智能整理");
+                    Check(agentToggle != null && agentToggle.IsChecked == false, "Agent toggle is missing or enabled state mismatch");
+                    TextBox summaryTime = Descendants(settings).OfType<TextBox>().FirstOrDefault(x => AutomationProperties.GetName(x) == "每日总结时间");
+                    TextBox model = Descendants(settings).OfType<TextBox>().FirstOrDefault(x => AutomationProperties.GetName(x) == "DeepSeek 模型");
+                    Check(summaryTime != null, "Daily summary time control is missing after navigation");
+                    Check(model != null, "DeepSeek model control is missing after navigation");
+                    Check(summaryTime.Text == "09:00" && summaryTime.Width <= 120, "Daily summary time is missing or still oversized");
+                    Check(model.Text == "deepseek-v4-flash" && model.MaxWidth <= 360, "Default model is missing or still oversized");
+                    PasswordBox apiKey = Descendants(settings).OfType<PasswordBox>().FirstOrDefault(x => AutomationProperties.GetName(x) == "DeepSeek API Key");
+                    Check(apiKey != null && apiKey.Password == "", "Saved API key was revealed in the UI or its field is missing");
+                    Check(model.ActualWidth >= 280 && apiKey.ActualWidth >= 480, "Credential fields collapsed instead of using a practical compact width");
                     Check(Descendants(settings).OfType<Button>().Any(x => Equals(x.Content, "测试连接")) && Descendants(settings).OfType<Button>().Any(x => Equals(x.Content, "清除 Key")), "Key management actions are missing");
+                    Button saveSettings = Descendants(settings).OfType<Button>().FirstOrDefault(x => Equals(x.Content, "保存设置"));
+                    Check(saveSettings != null && saveSettings.ActualHeight > 0 && saveSettings.TranslatePoint(new Point(), settings).Y + saveSettings.ActualHeight <= settings.ActualHeight, "Fixed settings footer is outside the visible window");
                     Capture(settings, "agent-settings.png");
                     settings.Close();
                 } catch (Exception e) { uiError = e.ToString(); settings.Close(); }
@@ -631,6 +1275,7 @@ internal static class CalendarTests
             string uiError = null;
             settings.ContentRendered += delegate {
                 try {
+                    Find<Button>(settings, x => AutomationProperties.GetName(x) == "设置导航 邮箱同步").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
                     Check(Find<TextBox>(settings, x => AutomationProperties.GetName(x) == "网易邮箱地址") != null, "Mail address field missing");
                     Check(Find<PasswordBox>(settings, x => AutomationProperties.GetName(x) == "网易邮箱授权码").Password == "", "Saved mail authorization code was revealed");
                     Check(Find<CheckBox>(settings, x => AutomationProperties.GetName(x) == "启用网易邮箱每日同步") != null, "Mail sync toggle missing");
@@ -895,6 +1540,194 @@ internal static class CalendarTests
 
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         using (Stream stream = typeof(Program).Assembly.GetManifestResourceStream("Theme.xaml")) app.Resources.MergedDictionaries.Add((ResourceDictionary)XamlReader.Load(stream));
+        Test("chat entry opens a conversation from the calendar", delegate {
+            var window = new CalendarWindow(new CalendarController(Store("chat-entry")));
+            try {
+                window.Show(); Pump();
+                Check(Descendants(window).OfType<Button>().Any(button => Equals(button.Content, "对话助手")), "Calendar has no 对话助手 entry");
+            } finally { window.Close(); }
+        });
+        Test("calendar deadline palette uses status semantics instead of per-task random colors", delegate {
+            DateTime now = new DateTime(2026, 9, 11, 10, 0, 0);
+            Todo normal = DeadlineTask("2026-09-11T09:00:00+08:00", 72, "hours", true);
+            Todo soon = DeadlineTask("2026-09-11T09:00:00+08:00", 24, "hours", true);
+            Todo overdue = DeadlineTask("2026-09-09T09:00:00+08:00", 24, "hours", true);
+            Todo uncertain = DeadlineTask("2026-09-11T09:00:00+08:00", 72, "hours", false);
+            Todo completed = DeadlineTask("2026-09-11T09:00:00+08:00", 72, "hours", true); completed.Completed = true;
+            Check(CalendarPalette.DeadlineBackground(normal, now) == "#DCEFE8", "Normal deadline color is not calm green");
+            Check(CalendarPalette.DeadlineBackground(soon, now) == "#F5DEB7", "Soon deadline color is not amber");
+            Check(CalendarPalette.DeadlineBackground(overdue, now) == "#F3D7D2", "Overdue deadline color is not red");
+            Check(CalendarPalette.DeadlineBackground(uncertain, now) == "#F7E7C4", "Unconfirmed deadline color is not amber");
+            Check(CalendarPalette.DeadlineBackground(completed, now) == "#E1E7E4", "Completed deadline color is not gray");
+        });
+        Test("chat window exposes accessible controls and prevents duplicate sends", delegate {
+            Type type = typeof(CalendarWindow).Assembly.GetType("LittleCalendar.ChatWindow");
+            Check(type != null, "ChatWindow is missing");
+            int sends = 0;
+            var history = new ChatHistory();
+            history.Messages.Add(ChatMessage.FromDisplay("user", ChatDisplay.UserInput("今天要做什么"), "2026-09-10T09:00:00+08:00"));
+            var window = (Window)Activator.CreateInstance(type, history, new Action<string>(text => sends++), new Action(delegate { }), new Action<string>(delegate { }));
+            try {
+                window.Show(); Pump();
+                foreach (string name in new[] { "对话消息列表", "消息输入框", "发送消息", "清空对话" })
+                    Check(Descendants(window).Any(control => AutomationProperties.GetName(control) == name), "Missing accessible chat control: " + name);
+                foreach (string label in new[] { "读取新邮件", "今天要做什么", "明天截止", "未来七天" })
+                    Check(Descendants(window).OfType<Button>().Any(button => Equals(button.Content, label)), "Missing shortcut: " + label);
+                var input = Find<TextBox>(window, control => AutomationProperties.GetName(control) == "消息输入框");
+                var send = Find<Button>(window, control => AutomationProperties.GetName(control) == "发送消息");
+                Check(input.AcceptsReturn && input.TextWrapping == TextWrapping.Wrap, "Input cannot accept multiline messages");
+                Check(Descendants(window).OfType<TextBox>().Any(control => control.IsReadOnly && control.Text == "今天要做什么"), "History text is not selectable");
+                input.Text = "今天要做什么"; send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(sends == 1 && !send.IsEnabled && !input.IsEnabled, "Busy chat allowed duplicate send");
+                type.GetMethod("CompleteSend").Invoke(window, new object[] { history, "已完成", true });
+                Check(send.IsEnabled && input.IsEnabled && input.Text == "", "Completed send did not restore controls");
+            } finally { window.Close(); }
+        });
+        Test("chat sync details appear once in a compact card with pixel scrolling", delegate {
+            var history = new ChatHistory();
+            history.Messages.Add(ChatMessage.FromDisplay("assistant", new ChatDisplay { Kind = "local_summary", Text = "邮箱增量同步完成。\n上次完成：2026-09-10T08:00:00+08:00" }, "2026-09-10T09:00:00+08:00", sync: new ChatSyncSummary {
+                PreviousCompletedAt = "2026-09-10T08:00:00+08:00", StartedAt = "2026-09-10T09:00:00+08:00", CompletedAt = "2026-09-10T09:01:00+08:00"
+            }));
+            var chat = new ChatWindow(history, delegate { }, delegate { }, delegate { });
+            try {
+                chat.Show(); Pump();
+                var text = Descendants(chat).OfType<TextBox>().Where(box => box.IsReadOnly).ToList();
+                Check(text.Count(box => box.Text.Contains("上次完成")) == 1, "Sync metadata is duplicated in the answer and summary card");
+                Check(text.Any(box => box.Text.Contains("2026-09-10 08:00:00 +08:00")), "Sync card did not format a compact time with its offset");
+                ListBox list = Find<ListBox>(chat, box => AutomationProperties.GetName(box) == "对话消息列表");
+                Check(VirtualizingPanel.GetScrollUnit(list) == ScrollUnit.Pixel && VirtualizingStackPanel.GetIsVirtualizing(list), "Long sync responses cannot scroll smoothly through a virtualized list");
+            } finally { chat.Close(); }
+        });
+        Test("runtime chat reuses window restores safe history and navigates without mutation", delegate {
+            MethodInfo open = typeof(CalendarRuntime).GetMethod("OpenChat");
+            Check(open != null, "Runtime OpenChat is missing");
+            DateTime now = new DateTime(2026, 9, 10, 9, 0, 0);
+            var controller = new CalendarController(Store("chat-runtime"));
+            controller.SaveTodo(new Todo { Title = "明日准备材料", Date = "2026-09-11", Time = "14:00" });
+            string before = File.ReadAllText(controller.Store.FilePath);
+            var history = new ChatHistoryStore(Path.GetDirectoryName(controller.Store.FilePath));
+            using (var runtime = new CalendarRuntime(controller, () => now)) {
+                runtime.ShowMain(); open.Invoke(runtime, null); Pump();
+                ChatWindow chat = app.Windows.OfType<ChatWindow>().Single();
+                open.Invoke(runtime, null); Pump();
+                Check(app.Windows.OfType<ChatWindow>().Single() == chat && chat.Owner == runtime.Window, "Runtime created a duplicate or unowned chat window");
+                WaitUntil(() => !chat.IsBusy);
+                Find<Button>(chat, button => Equals(button.Content, "明天截止")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                WaitUntil(() => !chat.IsBusy);
+                Check(history.Load().Messages.Count == 2, "Runtime did not persist one exchange");
+                Check(Descendants(chat).OfType<TextBox>().Any(box => box.IsReadOnly && box.Text.Contains("明日准备材料")), "Local query answer did not render");
+                Find<Button>(chat, button => button.Tag is string).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(runtime.Window.SelectedDate == new DateTime(2026, 9, 11) && File.ReadAllText(controller.Store.FilePath) == before, "Todo navigation changed an item or selected the wrong date");
+                Capture(chat, "chat-query.png");
+                chat.Close(); open.Invoke(runtime, null); Pump(); chat = app.Windows.OfType<ChatWindow>().Single();
+                WaitUntil(() => !chat.IsBusy);
+                Check(Find<ListBox>(chat, box => AutomationProperties.GetName(box) == "对话消息列表").Items.Count == 2, "Reopening did not restore the saved exchange");
+                Find<Button>(chat, button => Equals(button.Content, "清空对话")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(history.Load().Messages.Count == 2 && Find<Button>(chat, button => Equals(button.Content, "确认清空")).IsVisible, "Clear was not confirmed in the window");
+                Find<Button>(chat, button => Equals(button.Content, "取消清空")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(history.Load().Messages.Count == 2, "Cancel clear removed history");
+                Find<Button>(chat, button => Equals(button.Content, "清空对话")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                File.WriteAllText(history.FilePath + ".damaged-fixture", "recoverable old conversation");
+                Find<Button>(chat, button => Equals(button.Content, "确认清空")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                WaitUntil(() => !chat.IsBusy);
+                Check(history.Load().Messages.Count == 0 && File.ReadAllText(controller.Store.FilePath) == before, "Clear did not persist or changed calendar data");
+                Check(!File.Exists(history.FilePath + ".bak"), "Clear left the full conversation recoverable in its backup");
+                Check(!Directory.GetFiles(Path.GetDirectoryName(history.FilePath), Path.GetFileName(history.FilePath) + ".damaged-*").Any(), "Clear left recovered conversation artifacts on disk");
+            }
+        });
+        Test("runtime serializes chat incremental with manual and automatic mail sync", delegate {
+            MethodInfo open = typeof(CalendarRuntime).GetMethod("OpenChat");
+            Check(open != null, "Runtime OpenChat is missing");
+            var fixture = new IncrementalMailFixture("chat-runtime-gate"); fixture.Messages(43);
+            var controller = new CalendarController(new CalendarStore(Path.GetDirectoryName(fixture.StateStore.FilePath)));
+            var history = new ChatHistoryStore(Path.GetDirectoryName(fixture.StateStore.FilePath));
+            using (var release = new System.Threading.ManualResetEvent(false))
+            using (var entered = new System.Threading.ManualResetEvent(false))
+            using (var runtime = new CalendarRuntime(controller, () => fixture.Now, mailSync: fixture.Sync)) {
+                try {
+                    fixture.Factory.Client.BeforeFetch = delegate { entered.Set(); Check(release.WaitOne(5000), "Blocked mail fixture was not released"); };
+                    runtime.ShowMain(); open.Invoke(runtime, null); Pump();
+                    ChatWindow chat = app.Windows.OfType<ChatWindow>().Single(); WaitUntil(() => !chat.IsBusy);
+                    Find<Button>(chat, button => Equals(button.Content, "读取新邮件")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    WaitUntil(() => entered.WaitOne(0));
+                    Check(chat.IsBusy, "Chat did not stay busy during background mail fetch");
+                    runtime.StartMailSync(false, 14); runtime.StartMailSync(true, 2);
+                    Check(history.Load().Messages.Count == 1, "Duplicate chat submission reached history");
+                    chat.Close(); open.Invoke(runtime, null); Pump(); chat = app.Windows.OfType<ChatWindow>().Single();
+                    Check(chat.IsBusy, "Reopening during a request enabled duplicate sends");
+                    release.Set(); WaitUntil(() => !chat.IsBusy);
+                    Check(fixture.Factory.Client.Requests.Count == 1 && fixture.Factory.Client.Requests[0].MinimumUid == 43, "Manual or automatic sync overlapped the chat incremental request");
+                    Check(history.Load().Messages.Count == 2, "Closing chat lost the completed response");
+                    Check(Descendants(chat).OfType<TextBox>().Any(box => box.Text.Contains("UID 42 → 请求 43 → 43")), "Sync cursor card did not render");
+                    Capture(chat, "chat-sync.png");
+                    entered.Reset(); release.Reset(); runtime.StartMailSync(false, 7); WaitUntil(() => entered.WaitOne(0));
+                    Find<Button>(chat, button => Equals(button.Content, "读取新邮件")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(!chat.IsBusy && history.Load().Messages.Count == 2 && Descendants(chat).OfType<TextBlock>().Any(block => block.Text.Contains("邮箱正在处理")), "Chat did not reject an occupied mailbox gate safely");
+                    release.Set(); WaitUntil(() => fixture.Factory.Client.Requests.Count == 2); Pump();
+                } finally { release.Set(); }
+            }
+        });
+        Test("settings connection test respects the shared mailbox gate", delegate {
+            ConstructorInfo constructor = typeof(SettingsWindow).GetConstructors().Single();
+            Check(constructor.GetParameters().Length == 10, "Settings has no shared mailbox operation gate");
+            var controller = new CalendarController(Store("chat-settings-gate"));
+            string directory = Path.GetDirectoryName(controller.Store.FilePath);
+            var state = new MailStateStore(directory); state.Save(new MailSyncState { Account = new MailAccountSettings { Address = "fictional-gate@163.com" } });
+            var secret = new MailSecretStore(directory); secret.Save("mail-secret");
+            var factory = new FakeMailFactory(); bool acquired = false; int releases = 0;
+            Func<bool> acquire = () => acquired;
+            var settings = (SettingsWindow)constructor.Invoke(new object[] { controller, new Action(delegate { }), new SecretStore(directory), new FakeAgent(), state, secret, factory, null, acquire, new Action(() => releases++) });
+            try {
+                settings.Show(); Pump(); Find<Button>(settings, button => AutomationProperties.GetName(button) == "设置导航 邮箱同步").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                var test = Find<Button>(settings, button => Equals(button.Content, "测试邮箱连接"));
+                test.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                Check(!factory.Client.Connected && releases == 0 && test.IsEnabled, "Denied mailbox gate still opened a connection");
+                acquired = true; test.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                WaitUntil(() => releases == 1);
+                Check(factory.Client.Connected && test.IsEnabled, "Connection test did not release the gate after completion");
+            } finally { settings.Close(); }
+        });
+        Test("settings manual sync does not overwrite a newer cursor while the mailbox is busy", delegate {
+            var controller = new CalendarController(Store("chat-settings-sync-gate"));
+            string directory = Path.GetDirectoryName(controller.Store.FilePath); var stateStore = new MailStateStore(directory);
+            stateStore.Save(new MailSyncState { Account = new MailAccountSettings { Address = "fictional-sync@163.com" }, Folders = new List<MailFolderState> { new MailFolderState { FolderId = "INBOX", LastUid = 10 } } });
+            var secret = new MailSecretStore(directory); secret.Save("mail-secret"); int syncCalls = 0;
+            var settings = new SettingsWindow(controller, delegate { }, new SecretStore(directory), new FakeAgent(), stateStore, secret, new FakeMailFactory(),
+                delegate(int days) { syncCalls++; }, delegate { return false; }, delegate { });
+            stateStore.Save(new MailSyncState { Account = new MailAccountSettings { Address = "fictional-sync@163.com" }, Folders = new List<MailFolderState> { new MailFolderState { FolderId = "INBOX", LastUid = 99 } } });
+            try {
+                settings.Show(); Pump(); Find<Button>(settings, button => AutomationProperties.GetName(button) == "设置导航 邮箱同步").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                Find<Button>(settings, button => Equals(button.Content, "立即同步邮件")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                Check(syncCalls == 0 && stateStore.Load().Folders.Single().LastUid == 99, "Denied settings sync rolled back a cursor or started another mailbox operation");
+            } finally { settings.Close(); }
+        });
+        Test("chat Enter sends and a persistence failure restores controls without leaking errors", delegate {
+            var controller = new CalendarController(Store("chat-ui-failure"));
+            string directory = Path.GetDirectoryName(controller.Store.FilePath);
+            var history = new ChatHistoryStore(directory);
+            Directory.CreateDirectory(history.FilePath);
+            using (var runtime = new CalendarRuntime(controller)) {
+                runtime.OpenChat(); Pump();
+                ChatWindow chat = app.Windows.OfType<ChatWindow>().Single(); WaitUntil(() => !chat.IsBusy);
+                TextBox input = Find<TextBox>(chat, box => AutomationProperties.GetName(box) == "消息输入框");
+                input.Text = "今天要做什么";
+                var enter = new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice, PresentationSource.FromVisual(chat), Environment.TickCount, System.Windows.Input.Key.Enter) { RoutedEvent = System.Windows.Input.Keyboard.PreviewKeyDownEvent };
+                input.RaiseEvent(enter);
+                Check(enter.Handled && chat.IsBusy && !input.IsEnabled, "Enter did not initiate a background send");
+                WaitUntil(() => !chat.IsBusy);
+                Check(input.IsEnabled && input.Text == "今天要做什么", "Failed send lost input or left controls disabled");
+                Check(Descendants(chat).OfType<TextBlock>().Any(block => block.Text == "操作未完成，请检查本机对话记录或稍后重试。"), "Failure was not presented as a safe actionable status");
+                Check(!Descendants(chat).OfType<TextBox>().Any(box => box.IsReadOnly && box.Text.Contains(directory)), "Failure exposed a raw storage exception");
+                Directory.Delete(history.FilePath);
+                Find<Button>(chat, button => Equals(button.Content, "发送消息")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                WaitUntil(() => !chat.IsBusy);
+                Check(history.Load().Messages.Count == 2 && input.Text == "", "Recovered storage did not accept a retry");
+                runtime.SessionLockChanged(true); input.Text = "未来七天";
+                Find<Button>(chat, button => Equals(button.Content, "发送消息")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(!chat.IsBusy && history.Load().Messages.Count == 2, "Locked session started a chat request");
+            }
+        });
         Test("month view renders connected deadline bars and compact todo bubbles", delegate {
             DateTime now = new DateTime(2026, 9, 4, 10, 0, 0);
             var controller = new CalendarController(Store("visual-calendar"));
@@ -917,7 +1750,7 @@ internal static class CalendarTests
                 Capture(runtime.Window, "visual-calendar.png");
             }
         });
-        Test("normal deadline bars keep edge spacing and receive distinct stable colors", delegate {
+        Test("normal deadline bars keep edge spacing and share one semantic status color", delegate {
             DateTime now = new DateTime(2026, 9, 4, 10, 0, 0);
             var controller = new CalendarController(Store("visual-palette"));
             Todo first = DeadlineTask("2026-09-03T10:00:00+08:00", 96); first.Id = "palette-first"; first.Title = "蓝色期限";
@@ -928,7 +1761,7 @@ internal static class CalendarTests
                 var bars = Descendants(runtime.Window).OfType<Button>().Where(x => (AutomationProperties.GetName(x) ?? "").StartsWith("期限横条 ")).ToList();
                 Check(bars.Count == 4 && bars.All(x => x.Margin.Left >= 8 && x.Margin.Right >= 8), "Deadline bar touches a date-cell edge");
                 var colors = bars.Select(x => ((SolidColorBrush)Descendants(x).OfType<Border>().First(y => y.CornerRadius.TopLeft == 5).Background).Color.ToString()).Distinct().ToList();
-                Check(colors.Count == 2, "Different normal deadlines share the same visual color");
+                Check(colors.Count == 1 && colors.Single() == "#FFDCEFE8", "Normal deadlines do not share the semantic green color");
             }
         });
         Test("busy day exposes a clear overflow action and opens every item in the side panel", delegate {
@@ -1150,6 +1983,29 @@ internal static class CalendarTests
             };
             reopened.ShowDialog(); Check(uiError == null, "Reopen failed: " + uiError);
         });
+        Test("absolute mail deadline reopens as an explicit cutoff and saves the edited cutoff", delegate {
+            var original = new DeadlineSpec {
+                StartAt = "2026-09-12T10:00:00+08:00", Amount = 1, Unit = "absolute", Confirmed = true,
+                ManualEndAt = "2026-09-12T12:00:00+08:00", OriginalText = "（北京时间）2026-09-12 10:00--12:00"
+            };
+            var fields = new DeadlineFields(original, new DateTime(2026, 9, 12));
+            var window = new Window { Content = fields, Width = 620, Height = 680 }; string uiError = null;
+            window.Loaded += delegate {
+                try {
+                    ComboBox unit = Find<ComboBox>(window, x => AutomationProperties.GetName(x) == "期限单位");
+                    DatePicker endDate = Find<DatePicker>(window, x => AutomationProperties.GetName(x) == "人工核实的截止日期");
+                    TextBox endTime = Find<TextBox>(window, x => AutomationProperties.GetName(x) == "人工核实的截止时间");
+                    Check(unit.SelectedIndex == 3 && (unit.SelectedItem as string).Contains("明确截止"), "Absolute cutoff was mislabeled as a working-day deadline");
+                    Check(endDate.SelectedDate == new DateTime(2026, 9, 12) && endTime.Text == "12:00", "Saved absolute cutoff was not restored into the editor");
+                    endDate.SelectedDate = new DateTime(2026, 9, 19); endTime.Text = "12:00";
+                    Find<CheckBox>(window, x => AutomationProperties.GetName(x) == "已核实截止时间").IsChecked = true;
+                    DeadlineSpec edited = fields.Read();
+                    Check(edited.Unit == "absolute" && Deadlines.End(edited).LocalDateTime == new DateTime(2026, 9, 19, 12, 0, 0), "Edited absolute cutoff was not saved as the new calendar deadline");
+                    window.Close();
+                } catch (Exception error) { uiError = error.ToString(); window.Close(); }
+            };
+            window.ShowDialog(); Check(uiError == null, "Absolute deadline editor failed: " + uiError);
+        });
         Test("calendar displays active deadline on intermediate days and reminder says cutoff", delegate {
             var controller = new CalendarController(Store("deadline-calendar"));
             var task = DeadlineTask(DateTimeOffset.Now.AddDays(-1).ToString("o"), 72); controller.SaveTodo(task);
@@ -1302,7 +2158,7 @@ internal static class CalendarTests
     private static void Capture(Window window, string name)
     {
         window.UpdateLayout();
-        var surface = (FrameworkElement)window.Content;
+        var surface = window is ChatWindow ? (FrameworkElement)window : (FrameworkElement)window.Content;
         var bitmap = new RenderTargetBitmap((int)Math.Ceiling(surface.ActualWidth), (int)Math.Ceiling(surface.ActualHeight), 96, 96, PixelFormats.Pbgra32);
         bitmap.Render(surface); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using (var file = File.Create(Path.Combine(root, name))) encoder.Save(file);

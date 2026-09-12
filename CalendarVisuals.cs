@@ -99,14 +99,23 @@ namespace LittleCalendar
 
     public static class CalendarPalette
     {
-        private static readonly string[] NormalDeadlineColors = { "#DCEAF7", "#E9E0F5", "#F7E4D8", "#DCEFE6", "#F4E1EC" };
-        public static string NormalDeadline(Todo item)
+        public static string DeadlineBackground(Todo item, DateTime now)
         {
-            string key = (item == null ? "" : item.Id) ?? "";
-            if (key.Length == 0) key = item == null ? "" : item.Title ?? "";
-            long hash = 0;
-            foreach (char character in key) hash = ((hash * 31) + character) & 0x7fffffff;
-            return NormalDeadlineColors[(int)(hash % NormalDeadlineColors.Length)];
+            if (item == null || item.Deadline == null) return "#DCEFE8";
+            if (item.Completed) return "#E1E7E4";
+            DateTimeOffset instant = new DateTimeOffset(now), end = Deadlines.End(item.Deadline);
+            if (instant >= end) return "#F3D7D2";
+            if (!item.Deadline.Confirmed) return "#F7E7C4";
+            return end - instant <= TimeSpan.FromHours(24) ? "#F5DEB7" : "#DCEFE8";
+        }
+        public static string DeadlineForeground(Todo item, DateTime now)
+        {
+            if (item == null || item.Deadline == null) return "#216E5B";
+            if (item.Completed) return "#7B8C85";
+            DateTimeOffset instant = new DateTimeOffset(now), end = Deadlines.End(item.Deadline);
+            if (instant >= end) return "#9E4338";
+            if (!item.Deadline.Confirmed || end - instant <= TimeSpan.FromHours(24)) return "#825A22";
+            return "#216E5B";
         }
     }
 }
