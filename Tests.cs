@@ -1003,6 +1003,12 @@ internal static class CalendarTests
             Check(settings.Theme == "sakura", "Sakura theme is not preserved by appearance normalization");
             Check(palette.Accent == "#C65E82" && palette.Bubbles.Length == 5, "Sakura theme palette is incomplete");
         });
+        Test("appearance defaults panel clarity for older calendar data", delegate {
+            var settings = new AppearanceSettings();
+            var property = typeof(AppearanceSettings).GetProperty("PanelOpacity");
+            Check(property != null, "Appearance settings do not expose panel clarity");
+            Check((int)property.GetValue(settings, null) == 86, "Older calendar data does not receive the readable panel clarity default");
+        });
         Test("busy day exposes a clear overflow action and opens every item in the side panel", delegate {
             DateTime now = new DateTime(2026, 9, 4, 10, 0, 0);
             DateTime busyDay = new DateTime(2026, 9, 5);

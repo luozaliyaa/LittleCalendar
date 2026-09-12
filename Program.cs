@@ -82,6 +82,11 @@ namespace LittleCalendar
             opacity.ValueChanged += delegate { opacityValue.Text = ((int)opacity.Value) + "%"; };
             var opacityRow = new StackPanel { Orientation = Orientation.Horizontal }; opacityRow.Children.Add(opacity); opacityValue.Margin = new Thickness(12, 0, 0, 0); opacityRow.Children.Add(opacityValue);
             panel.Children.Add(UI.Field("页面背景透明度", opacityRow));
+            var panelOpacity = new Slider { Minimum = 70, Maximum = 100, TickFrequency = 5, IsSnapToTickEnabled = true, Value = savedAppearance.PanelOpacity, Width = 230, HorizontalAlignment = HorizontalAlignment.Left };
+            var panelOpacityValue = UI.Text(((int)panelOpacity.Value) + "%", 12, "#607873");
+            panelOpacity.ValueChanged += delegate { panelOpacityValue.Text = ((int)panelOpacity.Value) + "%"; };
+            var panelOpacityRow = new StackPanel { Orientation = Orientation.Horizontal }; panelOpacityRow.Children.Add(panelOpacity); panelOpacityValue.Margin = new Thickness(12, 0, 0, 0); panelOpacityRow.Children.Add(panelOpacityValue);
+            panel.Children.Add(UI.Field("月历与侧栏清晰度", panelOpacityRow));
             var backgroundMode = new ComboBox { HorizontalAlignment = HorizontalAlignment.Left, MinWidth = 220 };
             backgroundMode.Items.Add(new ComboBoxItem { Content = "铺满裁切（不拉伸）", Tag = "cover" });
             backgroundMode.Items.Add(new ComboBoxItem { Content = "完整显示（不拉伸）", Tag = "contain" });
@@ -99,7 +104,7 @@ namespace LittleCalendar
             }));
             backgroundActions.Children.Add(UI.Button("移除背景图", delegate { pendingBackgroundPath = ""; removeBackground = true; backgroundHint.Text = "保存设置后将移除背景图片。"; }));
             backgroundActions.Children.Add(UI.Button("恢复默认外观", delegate {
-                theme.SelectedIndex = 0; opacity.Value = 100; backgroundMode.SelectedIndex = 0; pendingBackgroundPath = ""; removeBackground = true; backgroundHint.Text = "保存设置后恢复默认外观。";
+                theme.SelectedIndex = 0; opacity.Value = 100; panelOpacity.Value = 86; backgroundMode.SelectedIndex = 0; pendingBackgroundPath = ""; removeBackground = true; backgroundHint.Text = "保存设置后恢复默认外观。";
             }));
             panel.Children.Add(backgroundActions);
             panel = agentPanel;
@@ -266,6 +271,7 @@ namespace LittleCalendar
                         var appearance = savedAppearance.Copy();
                         appearance.Theme = (string)((ComboBoxItem)theme.SelectedItem).Tag;
                         appearance.BackgroundOpacity = (int)opacity.Value;
+                        appearance.PanelOpacity = (int)panelOpacity.Value;
                         appearance.BackgroundMode = (string)((ComboBoxItem)backgroundMode.SelectedItem).Tag;
                         string importedBackground = "";
                         if (!String.IsNullOrWhiteSpace(pendingBackgroundPath)) {

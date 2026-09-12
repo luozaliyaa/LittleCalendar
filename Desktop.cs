@@ -259,7 +259,7 @@ namespace LittleCalendar
             newTodoButton.Background = UI.Brush(palette.Accent); addTodoButton.Background = UI.Brush(palette.Accent); mailSyncButton.Background = UI.Brush(palette.SelectedDay); agentRefresh.Background = UI.Brush(palette.SelectedDay);
             mailSyncButton.Foreground = UI.Brush(palette.AccentText); agentRefresh.Foreground = UI.Brush(palette.AccentText);
             agentCard.Background = UI.Brush(palette.AgentBackground); agentCard.BorderBrush = UI.Brush(palette.AgentBorder);
-            string cardSurface = String.IsNullOrWhiteSpace(settings.BackgroundFile) ? "#FFFFFF" : "#ECFFFFFF";
+            string cardSurface = String.IsNullOrWhiteSpace(settings.BackgroundFile) ? "#FFFFFFFF" : String.Format("#{0:X2}FFFFFF", (int)Math.Round(255 * settings.PanelOpacity / 100.0));
             calendarCard.Background = UI.Brush(cardSurface); sideCard.Background = UI.Brush(cardSurface);
             backgroundOverlay.Background = UI.Brush(palette.Canvas); backgroundOverlay.Opacity = String.IsNullOrWhiteSpace(settings.BackgroundFile) ? 1 : 0.42;
             backgroundImage.Opacity = settings.BackgroundOpacity / 100.0;

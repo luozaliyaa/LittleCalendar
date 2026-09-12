@@ -10,11 +10,12 @@ namespace LittleCalendar
     {
         public string Theme { get; set; }
         public int BackgroundOpacity { get; set; }
+        public int PanelOpacity { get; set; }
         public string BackgroundFile { get; set; }
         public string BackgroundMode { get; set; }
         public AppearanceSettings()
         {
-            Theme = "emerald"; BackgroundOpacity = 100; BackgroundFile = ""; BackgroundMode = "cover";
+            Theme = "emerald"; BackgroundOpacity = 100; PanelOpacity = 86; BackgroundFile = ""; BackgroundMode = "cover";
         }
         public AppearanceSettings Copy() { return (AppearanceSettings)MemberwiseClone(); }
     }
@@ -43,6 +44,7 @@ namespace LittleCalendar
             if (value == null) return;
             if (!new[] { "emerald", "blue", "purple", "sakura" }.Contains(value.Theme)) value.Theme = "emerald";
             if (value.BackgroundOpacity < 70 || value.BackgroundOpacity > 100) value.BackgroundOpacity = 100;
+            if (value.PanelOpacity < 70 || value.PanelOpacity > 100) value.PanelOpacity = 86;
             value.BackgroundFile = value.BackgroundFile ?? "";
             if (!new[] { "cover", "contain" }.Contains(value.BackgroundMode)) value.BackgroundMode = "cover";
         }
