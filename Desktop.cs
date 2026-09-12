@@ -429,7 +429,9 @@ namespace LittleCalendar
             System.Windows.Automation.AutomationProperties.SetName(complete, "完成 " + item.Title);
             complete.Click += delegate { Guard(delegate { controller.Complete(item.Id, complete.IsChecked == true); }); }; layout.Children.Add(complete);
             var content = new StackPanel(); Grid.SetColumn(content, 1); layout.Children.Add(content);
-            var title = UI.Text(item.Title, 14, item.Completed ? "#8D9C95" : "#2C4841"); if (item.Completed) title.TextDecorations = TextDecorations.Strikethrough; content.Children.Add(title);
+            var titleRow = new Grid(); titleRow.ColumnDefinitions.Add(new ColumnDefinition()); titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var title = UI.Text(item.Title, 14, item.Completed ? "#8D9C95" : "#2C4841"); if (item.Completed) title.TextDecorations = TextDecorations.Strikethrough; titleRow.Children.Add(title);
+            var edit = UI.Button(item.Deleted ? "恢复" : "编辑", delegate { if (item.Deleted) Guard(delegate { controller.Trash(item.Id, false); }); else Edit(item); }); edit.VerticalAlignment = VerticalAlignment.Top; edit.Padding = new Thickness(10, 4, 10, 4); edit.FontSize = 11; edit.Margin = new Thickness(8, 0, 0, 0); Grid.SetColumn(edit, 1); titleRow.Children.Add(edit); content.Children.Add(titleRow);
             string timing = item.Deadline == null ? (showDate ? Dates.Parse(item.Date).ToString("M月d日") + " · " : "") + (String.IsNullOrEmpty(item.Time) ? "全天" : item.Time) : Deadlines.Description(item, clock());
             bool overdue = item.Deadline != null && !item.Completed && new DateTimeOffset(clock()) >= Deadlines.End(item.Deadline);
             var info = UI.Text(timing + (item.Important ? " · 重要" : "") + (item.Remind ? item.Deadline == null ? " · 前一天提醒" : " · 提前 24 小时提醒" : ""), 11, overdue ? "#B2634F" : item.Important ? "#A27536" : "#6F877C"); info.Margin = new Thickness(0, 6, 0, 0); content.Children.Add(info);
@@ -449,7 +451,6 @@ namespace LittleCalendar
                 openMail.HorizontalAlignment = HorizontalAlignment.Left; openMail.Margin = new Thickness(0, 7, 0, 0); openMail.Padding = new Thickness(9, 4, 9, 4); content.Children.Add(openMail);
             }
             if (taskDetailsExpanded && !String.IsNullOrWhiteSpace(item.Notes)) { var notes = UI.Text(item.Notes, 12, "#6F877C"); notes.MaxHeight = 44; notes.Margin = new Thickness(0, 8, 0, 0); notes.TextTrimming = TextTrimming.CharacterEllipsis; content.Children.Add(notes); }
-            var edit = UI.Button(item.Deleted ? "恢复" : "编辑", delegate { if (item.Deleted) Guard(delegate { controller.Trash(item.Id, false); }); else Edit(item); }); edit.HorizontalAlignment = HorizontalAlignment.Right; edit.Padding = new Thickness(10, 4, 10, 4); edit.FontSize = 11; edit.Margin = new Thickness(0, 8, 0, 0); content.Children.Add(edit);
             bool pending = !item.Completed && !item.Deleted;
             AppearanceProfile palette = AppearancePalette.Current;
             string pendingBackground = palette.Accent == "#197B68" ? "#F6FBF8" : palette.AgentBackground;

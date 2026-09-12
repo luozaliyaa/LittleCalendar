@@ -600,6 +600,18 @@ internal static class CalendarTests
                 Check(Descendants(runtime.Window).OfType<Button>().Any(x => Equals(x.Content, "打开原邮件")), "Detailed task list did not reveal mail details");
             }
         });
+        Test("task-card edit action aligns with its completion control", delegate {
+            var controller = new CalendarController(Store("task-edit-alignment"));
+            controller.SaveTodo(new Todo { Id = "alignment", Title = "调整卡片布局", Date = "2026-09-07" });
+            using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0))) {
+                runtime.ShowMain(); Pump();
+                CheckBox complete = Find<CheckBox>(runtime.Window, x => AutomationProperties.GetName(x) == "完成 调整卡片布局");
+                Button edit = Find<Button>(runtime.Window, x => Equals(x.Content, "编辑"));
+                double completeTop = complete.TranslatePoint(new Point(), runtime.Window).Y;
+                double editTop = edit.TranslatePoint(new Point(), runtime.Window).Y;
+                Check(Math.Abs(completeTop - editTop) <= 10, "Task-card edit action is not aligned with its completion control");
+            }
+        });
         Test("header search is one compact control aligned with the action buttons", delegate {
             var controller = new CalendarController(Store("compact-search"));
             using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0))) {
