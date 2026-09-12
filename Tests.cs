@@ -148,6 +148,9 @@ internal static class CalendarTests
             Check(File.Exists(iconPath), "Custom icon file is missing from the application package");
             using (var appIcon = new System.Drawing.Icon(iconPath)) {
                 Check(appIcon.Width >= 16 && appIcon.Height >= 16, "Custom icon could not be read");
+                using (var bitmap = appIcon.ToBitmap()) {
+                    Check(bitmap.GetPixel(0, 0).A == 0, "Custom icon still has an opaque white outer corner");
+                }
             }
         });
         Test("v2 calendar upgrades without treating legacy completed work as newly completed", delegate {
