@@ -48,22 +48,29 @@ namespace LittleCalendar
             MailSyncState mailState;
             try { mailState = mailStateStore.Load(); } catch { mailState = new MailSyncState(); }
             SetResourceReference(StyleProperty, typeof(Window));
-            Title = "提醒、智能整理与邮箱设置"; Width = 650; Height = 900; MinHeight = 680; ResizeMode = ResizeMode.CanResizeWithGrip; WindowStartupLocation = WindowStartupLocation.CenterOwner; ShowInTaskbar = false;
-            var panel = new StackPanel { Margin = new Thickness(26) };
+            Title = "设置"; Width = 920; Height = 720; MinWidth = 780; MinHeight = 600; ResizeMode = ResizeMode.CanResizeWithGrip; WindowStartupLocation = WindowStartupLocation.CenterOwner; ShowInTaskbar = false;
+            var reminderSection = new StackPanel { Margin = new Thickness(28, 24, 28, 28) };
+            var agentSection = new StackPanel { Margin = new Thickness(28, 24, 28, 28) };
+            var mailSection = new StackPanel { Margin = new Thickness(28, 24, 28, 28) };
+            var dataSection = new StackPanel { Margin = new Thickness(28, 24, 28, 28) };
+            StackPanel panel = reminderSection;
             var message = UI.Text("", 12, "#7E968A");
-            var heading = UI.Text("提前一天，心里有数", 23, "#25483F"); heading.Margin = new Thickness(0, 0, 0, 20); panel.Children.Add(heading);
-            var time = new TextBox { Text = controller.Data.ReminderTime, MaxLength = 5 }; panel.Children.Add(UI.Field("普通待办：前一天几点提醒（24 小时制）", time));
+            var heading = UI.Text("提醒", 23, "#25483F"); heading.Margin = new Thickness(0, 0, 0, 5); panel.Children.Add(heading);
+            var intro = UI.Text("设置普通待办、截止期限和桌面提醒方式。", 12, "#82958C"); intro.Margin = new Thickness(0, 0, 0, 24); panel.Children.Add(intro);
+            var time = new TextBox { Text = controller.Data.ReminderTime, MaxLength = 5, Width = 110, Height = 38, MinHeight = 0, HorizontalAlignment = HorizontalAlignment.Left }; panel.Children.Add(UI.Field("普通待办：前一天几点提醒（24 小时制）", time));
             panel.Children.Add(UI.Text("截止期限：固定提前 24 小时提醒，不受上面的时间设置影响。", 12, "#82958C"));
-            var sound = UI.Option("◷", "提醒时播放提示音", "声音选项"); sound.IsChecked = controller.Data.Sound; panel.Children.Add(sound);
+            var sound = UI.Toggle("提醒时播放提示音", "声音选项"); sound.IsChecked = controller.Data.Sound; panel.Children.Add(sound);
             bool originalStartup = Startup.Enabled;
-            var startup = UI.Option("↗", "随 Windows 登录启动，在托盘等待提醒", "开机启动选项"); startup.IsChecked = originalStartup; panel.Children.Add(startup);
+            var startup = UI.Toggle("随 Windows 登录启动，在托盘等待提醒", "开机启动选项"); startup.IsChecked = originalStartup; panel.Children.Add(startup);
             var help = UI.Text("关闭窗口后仍会提醒。通过托盘菜单退出或关机后，提醒会暂停；再次运行会补发当天及次日未过期的提醒。", 12, "#82958C"); help.Margin = new Thickness(0, 8, 0, 18); panel.Children.Add(help);
             var preview = UI.Button("看看提醒长什么样", testReminder); preview.HorizontalAlignment = HorizontalAlignment.Left; preview.Margin = new Thickness(0, 0, 0, 18); panel.Children.Add(preview);
-            panel.Children.Add(UI.Text("智能整理 · DeepSeek", 16, "#355449"));
-            var agentEnabled = UI.Option("✦", "每天自动整理一次近期待办", "启用每日智能整理"); agentEnabled.IsChecked = controller.Data.Agent.Enabled; panel.Children.Add(agentEnabled);
-            var agentTime = new TextBox { Text = controller.Data.Agent.DailyTime, MaxLength = 5 }; panel.Children.Add(UI.Field("每日总结时间", agentTime));
-            var model = new TextBox { Text = controller.Data.Agent.Model, MaxLength = 80 }; panel.Children.Add(UI.Field("DeepSeek 模型", model));
-            var key = new PasswordBox { MaxLength = 300 }; AutomationProperties.SetName(key, "DeepSeek API Key"); panel.Children.Add(UI.Field("DeepSeek API Key", key));
+            panel = agentSection;
+            var agentHeading = UI.Text("智能整理", 23, "#25483F"); agentHeading.Margin = new Thickness(0, 0, 0, 5); panel.Children.Add(agentHeading);
+            var agentIntro = UI.Text("让 DeepSeek 根据截止时间、重要性和任务状态生成简短建议。", 12, "#82958C"); agentIntro.Margin = new Thickness(0, 0, 0, 24); panel.Children.Add(agentIntro);
+            var agentEnabled = UI.Toggle("每天自动整理一次近期待办", "启用每日智能整理"); agentEnabled.IsChecked = controller.Data.Agent.Enabled; panel.Children.Add(agentEnabled);
+            var agentTime = new TextBox { Text = controller.Data.Agent.DailyTime, MaxLength = 5, Width = 110, Height = 38, MinHeight = 0, HorizontalAlignment = HorizontalAlignment.Left }; panel.Children.Add(UI.Field("每日总结时间", agentTime));
+            var model = new TextBox { Text = controller.Data.Agent.Model, MaxLength = 80, Width = 320, MaxWidth = 360, Height = 38, MinHeight = 0, HorizontalAlignment = HorizontalAlignment.Left }; panel.Children.Add(UI.Field("DeepSeek 模型", model));
+            var key = new PasswordBox { MaxLength = 300, Width = 520, MaxWidth = 520, Height = 38, MinHeight = 0, HorizontalAlignment = HorizontalAlignment.Left }; AutomationProperties.SetName(key, "DeepSeek API Key"); panel.Children.Add(UI.Field("DeepSeek API Key", key));
             var keyHint = UI.Text(secrets.HasKey ? "已使用 Windows 当前用户加密保存。留空不会覆盖现有 Key。" : "尚未保存 Key。Key 不会写入日历数据、备份或日志。", 12, "#82958C"); keyHint.TextWrapping = TextWrapping.Wrap; panel.Children.Add(keyHint);
             var privacy = UI.Text("生成总结时，会把未完成待办的标题、时间、期限、重要性和备注发送给 DeepSeek；不会发送已完成项、回收站或两周后的普通安排。", 12, "#82958C"); privacy.TextWrapping = TextWrapping.Wrap; privacy.Margin = new Thickness(0, 8, 0, 10); panel.Children.Add(privacy);
             var keyActions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 20) };
@@ -84,20 +91,22 @@ namespace LittleCalendar
             var clearKey = UI.Button("清除 Key", delegate {
                 try { secrets.Clear(); key.Password = ""; keyHint.Text = "Key 已清除。保存设置后，自动整理仍会保持关闭，直到重新配置。"; message.Text = "已清除本机保存的 DeepSeek API Key。"; }
                 catch (Exception e) { message.Text = "清除失败：" + e.Message; }
-            }); keyActions.Children.Add(clearKey); panel.Children.Add(keyActions);
-            panel.Children.Add(UI.Text("网易邮箱同步", 16, "#355449"));
-            var mailEnabled = UI.Option("✉", "每天读取招聘邮件并自动生成待办", "启用网易邮箱每日同步");
+            }); clearKey.SetResourceReference(FrameworkElement.StyleProperty, "DangerTextButton"); keyActions.Children.Add(clearKey); panel.Children.Add(keyActions);
+            panel = mailSection;
+            var mailHeading = UI.Text("邮箱同步", 23, "#25483F"); mailHeading.Margin = new Thickness(0, 0, 0, 5); panel.Children.Add(mailHeading);
+            var mailIntro = UI.Text("连接网易邮箱，读取招聘邮件并按规则生成待办或机会通知。", 12, "#82958C"); mailIntro.Margin = new Thickness(0, 0, 0, 24); panel.Children.Add(mailIntro);
+            var mailEnabled = UI.Toggle("每天读取招聘邮件并自动生成待办", "启用网易邮箱每日同步");
             mailEnabled.IsChecked = mailState.Account.Enabled; panel.Children.Add(mailEnabled);
-            var mailAddress = new TextBox { Text = mailState.Account.Address, MaxLength = 160 };
+            var mailAddress = new TextBox { Text = mailState.Account.Address, MaxLength = 160, Width = 520, MaxWidth = 520, Height = 38, MinHeight = 0, HorizontalAlignment = HorizontalAlignment.Left };
             AutomationProperties.SetName(mailAddress, "网易邮箱地址"); panel.Children.Add(UI.Field("网易邮箱地址", mailAddress));
-            var mailHost = new TextBox { Text = String.IsNullOrWhiteSpace(mailState.Account.Host) ? "imap.163.com" : mailState.Account.Host, MaxLength = 160 };
+            var mailHost = new TextBox { Text = String.IsNullOrWhiteSpace(mailState.Account.Host) ? "imap.163.com" : mailState.Account.Host, MaxLength = 160, Height = 38, MinHeight = 0 };
             AutomationProperties.SetName(mailHost, "IMAP服务器");
-            var mailPort = new TextBox { Text = (mailState.Account.Port <= 0 ? 993 : mailState.Account.Port).ToString(), MaxLength = 5 };
+            var mailPort = new TextBox { Text = (mailState.Account.Port <= 0 ? 993 : mailState.Account.Port).ToString(), MaxLength = 5, Height = 38, MinHeight = 0 };
             AutomationProperties.SetName(mailPort, "IMAP端口");
-            var serverRow = new Grid(); serverRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(3, GridUnitType.Star) }); serverRow.ColumnDefinitions.Add(new ColumnDefinition());
+            var serverRow = new Grid { MaxWidth = 520, HorizontalAlignment = HorizontalAlignment.Left }; serverRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(390) }); serverRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
             FrameworkElement hostField = UI.Field("IMAP服务器", mailHost); FrameworkElement portField = UI.Field("SSL端口", mailPort);
             hostField.Margin = new Thickness(0, 0, 10, 0); Grid.SetColumn(portField, 1); serverRow.Children.Add(hostField); serverRow.Children.Add(portField); panel.Children.Add(serverRow);
-            var mailAuthorization = new PasswordBox { MaxLength = 300 };
+            var mailAuthorization = new PasswordBox { MaxLength = 300, Width = 520, MaxWidth = 520, Height = 38, MinHeight = 0, HorizontalAlignment = HorizontalAlignment.Left };
             panel.Children.Add(UI.Field("客户端授权码（不是网页登录密码）", mailAuthorization));
             AutomationProperties.SetName(mailAuthorization, "网易邮箱授权码");
             var mailHint = UI.Text(mailSecrets.HasKey ? "授权码已使用 Windows 当前用户加密保存，留空不会覆盖。" : "请在网易邮箱开启 IMAP 后生成客户端授权码。", 12, "#82958C");
@@ -114,7 +123,7 @@ namespace LittleCalendar
             var mailStatus = UI.Text(mailStatusText, 12, String.IsNullOrWhiteSpace(mailState.LastError) ? "#526E64" : "#A45D43");
             mailStatus.TextWrapping = TextWrapping.Wrap; mailStatus.Margin = new Thickness(0, 6, 0, 8);
             AutomationProperties.SetName(mailStatus, "邮箱同步状态"); panel.Children.Add(mailStatus);
-            var syncDays = new ComboBox { MinWidth = 180, HorizontalAlignment = HorizontalAlignment.Left };
+            var syncDays = new ComboBox { MinWidth = 180, Height = 38, MinHeight = 0, HorizontalAlignment = HorizontalAlignment.Left };
             AutomationProperties.SetName(syncDays, "手动同步邮件范围");
             foreach (int value in new[] { 1, 3, 7, 14, 30 }) syncDays.Items.Add(new ComboBoxItem { Content = "最近 " + value + " 天", Tag = value });
             int savedDays = new[] { 1, 3, 7, 14, 30 }.Contains(mailState.Account.ManualSyncDays) ? mailState.Account.ManualSyncDays : 7;
@@ -144,7 +153,7 @@ namespace LittleCalendar
                 if (String.IsNullOrWhiteSpace(mailHost.Text)) throw new ArgumentException("IMAP服务器不能为空。");
                 return new MailConnectionOptions { Address = mailAddress.Text.Trim(), Host = mailHost.Text.Trim(), Port = portValue, UseSsl = true };
             };
-            var mailActions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 18) };
+            var mailActions = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 18) };
             Button testMail = null;
             testMail = UI.Button("测试邮箱连接", delegate {
                 string authorization; MailConnectionOptions options;
@@ -186,10 +195,10 @@ namespace LittleCalendar
                 } catch (Exception e) { message.Text = e.Message; }
                 finally { if (ownsMailbox && releaseMailbox != null) releaseMailbox(); }
             }));
-            mailActions.Children.Add(UI.Button("清除邮箱授权", delegate {
+            var clearMail = UI.Button("清除邮箱授权", delegate {
                 try { mailSecrets.Clear(); mailAuthorization.Password = ""; mailHint.Text = "授权码已清除。"; message.Text = "已清除本机保存的网易邮箱授权码。"; }
                 catch (Exception e) { message.Text = "清除失败：" + e.Message; }
-            }));
+            }); clearMail.SetResourceReference(FrameworkElement.StyleProperty, "DangerTextButton"); mailActions.Children.Add(clearMail);
             mailActions.Children.Add(UI.Button("打开邮箱日志目录", delegate {
                 try {
                     string logDirectory = new MailDiagnosticLog(dataDirectory).DirectoryPath;
@@ -199,6 +208,9 @@ namespace LittleCalendar
                 } catch (Exception e) { message.Text = "打开日志目录失败：" + e.Message; }
             }));
             panel.Children.Add(mailActions);
+            panel = dataSection;
+            var dataHeading = UI.Text("数据与系统", 23, "#25483F"); dataHeading.Margin = new Thickness(0, 0, 0, 5); panel.Children.Add(dataHeading);
+            var dataIntro = UI.Text("管理本机数据备份和存储位置。", 12, "#82958C"); dataIntro.Margin = new Thickness(0, 0, 0, 24); panel.Children.Add(dataIntro);
             panel.Children.Add(UI.Text("数据与备份", 16, "#355449"));
             var actions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 10) };
             actions.Children.Add(UI.Button("导出备份", delegate {
@@ -215,8 +227,7 @@ namespace LittleCalendar
                 } catch (Exception e) { message.Text = "恢复失败：" + e.Message; }
             }));
             panel.Children.Add(actions);
-            var directory = new TextBox { Text = Path.GetDirectoryName(controller.Store.FilePath), IsReadOnly = true, FontSize = 11, Background = System.Windows.Media.Brushes.Transparent }; panel.Children.Add(directory);
-            message.Margin = new Thickness(0, 10, 0, 16); panel.Children.Add(message);
+            var directory = new TextBox { Text = Path.GetDirectoryName(controller.Store.FilePath), IsReadOnly = true, FontSize = 11, Background = System.Windows.Media.Brushes.Transparent, Width = 560, MaxWidth = 560, HorizontalAlignment = HorizontalAlignment.Left }; panel.Children.Add(directory);
             var footer = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
             var cancel = UI.Button("取消", delegate { DialogResult = false; }); cancel.IsCancel = true; footer.Children.Add(cancel);
             var save = UI.Button("保存设置", delegate {
@@ -250,7 +261,43 @@ namespace LittleCalendar
                     catch { if (requested != originalStartup) Startup.Set(originalStartup); throw; }
                     DialogResult = true;
                 } catch (Exception e) { message.Text = "保存失败：" + e.Message; }
-            }, true); save.IsDefault = true; footer.Children.Add(save); panel.Children.Add(footer); Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            }, true); save.IsDefault = true; footer.Children.Add(save);
+
+            var shell = new Grid { Margin = new Thickness(22) };
+            shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            shell.RowDefinitions.Add(new RowDefinition());
+            shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var titlePanel = UI.Stack(UI.Text("设置", 25, "#25483F"), UI.Text("管理提醒、智能整理、邮箱同步和本机数据。", 12, "#82958C"));
+            titlePanel.Margin = new Thickness(2, 0, 0, 18); shell.Children.Add(titlePanel);
+            var body = new Grid(); AutomationProperties.SetName(body, "设置双栏布局");
+            body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(170) });
+            body.ColumnDefinitions.Add(new ColumnDefinition()); Grid.SetRow(body, 1); shell.Children.Add(body);
+            var navigation = new StackPanel { Margin = new Thickness(0, 4, 16, 0) };
+            var contentHost = new Grid();
+            var contentSurface = new Border { Background = System.Windows.Media.Brushes.White, CornerRadius = new CornerRadius(12), Child = contentHost };
+            Grid.SetColumn(contentSurface, 1);
+            body.Children.Add(navigation); body.Children.Add(contentSurface);
+            var sections = new[] { reminderSection, agentSection, mailSection, dataSection };
+            var sectionScrollers = sections.Select(section => new ScrollViewer { Content = section, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }).ToArray();
+            foreach (ScrollViewer scroller in sectionScrollers) contentHost.Children.Add(scroller);
+            var navigationButtons = new List<Button>();
+            string[] labels = { "提醒", "智能整理", "邮箱同步", "数据与系统" };
+            Action<int> showSection = index => {
+                for (int i = 0; i < sectionScrollers.Length; i++) {
+                    sectionScrollers[i].Visibility = i == index ? Visibility.Visible : Visibility.Collapsed;
+                    navigationButtons[i].Background = UI.Brush(i == index ? "#E1F0EB" : "#F4F7F6");
+                    navigationButtons[i].Foreground = UI.Brush(i == index ? "#197B68" : "#526E64");
+                }
+            };
+            for (int i = 0; i < labels.Length; i++) {
+                int index = i; Button nav = UI.Button(labels[i], delegate { showSection(index); });
+                nav.SetResourceReference(FrameworkElement.StyleProperty, "NavigationButton");
+                AutomationProperties.SetName(nav, "设置导航 " + labels[i]); navigationButtons.Add(nav); navigation.Children.Add(nav);
+            }
+            var bottom = new Grid { Margin = new Thickness(0, 16, 0, 0) };
+            bottom.ColumnDefinitions.Add(new ColumnDefinition()); bottom.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            message.Margin = new Thickness(4, 0, 16, 0); bottom.Children.Add(message); Grid.SetColumn(footer, 1); bottom.Children.Add(footer);
+            Grid.SetRow(bottom, 2); shell.Children.Add(bottom); Content = shell; showSection(0);
         }
     }
 

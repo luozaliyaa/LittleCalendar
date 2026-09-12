@@ -81,6 +81,13 @@ namespace LittleCalendar
             System.Windows.Automation.AutomationProperties.SetName(option, name);
             return option;
         }
+        public static CheckBox Toggle(string text, string name)
+        {
+            var toggle = new CheckBox { Content = text };
+            toggle.SetResourceReference(FrameworkElement.StyleProperty, "ToggleSwitch");
+            System.Windows.Automation.AutomationProperties.SetName(toggle, name);
+            return toggle;
+        }
     }
 
     public sealed class ChatWindow : Window
@@ -335,9 +342,11 @@ namespace LittleCalendar
                 agentStatus.Text = String.IsNullOrWhiteSpace(lastError) ? "尚未生成总结" : "上次整理失败：" + lastError;
                 agentMore.Visibility = Visibility.Collapsed;
             } else {
-                agentOverview.Text = summary.Overview;
-                var lines = summary.Today.Concat(summary.Upcoming).Concat(summary.Risks).Take(3).Select(x => "• " + x).ToArray();
-                agentDetails.Text = lines.Length == 0 ? "近期没有额外事项。" : String.Join("\n", lines);
+                AgentCardProjection view = AgentCardProjection.From(summary);
+                agentOverview.Text = view.Headline;
+                var lines = view.Priorities.Select((x, i) => (i + 1) + "  " + x).ToList();
+                string priorities = lines.Count == 0 ? "暂时没有需要特别关注的事项。" : "优先处理\n" + String.Join("\n", lines);
+                agentDetails.Text = String.IsNullOrWhiteSpace(view.Risk) ? priorities : priorities + "\n\n⚠ 风险提醒\n" + view.Risk;
                 DateTimeOffset when; string cachedAt = DateTimeOffset.TryParse(controller.Data.Agent.LastSummaryAt, out when) ? when.LocalDateTime.ToString("M月d日 HH:mm") : "未知时间";
                 agentStatus.Text = String.IsNullOrWhiteSpace(lastError) ? "更新于 " + cachedAt : "上次整理失败：" + lastError + "；仍显示旧总结（" + cachedAt + "）";
                 agentMore.Visibility = Visibility.Visible;
@@ -526,12 +535,8 @@ namespace LittleCalendar
         }
         private static void RefreshDeadlineBar(DeadlineBarView view, DateTime now)
         {
-            DateTimeOffset instant = new DateTimeOffset(now), end = Deadlines.End(view.Item.Deadline);
-            bool overdue = !view.Item.Completed && instant >= end;
-            bool soon = !view.Item.Completed && !overdue && end - instant <= TimeSpan.FromHours(24);
-            string background = view.Item.Completed ? "#E1E7E4" : overdue ? "#F3D7D2" : !view.Item.Deadline.Confirmed ? "#F7E7C4" : soon ? "#F5DEB7" : CalendarPalette.NormalDeadline(view.Item);
-            string foreground = view.Item.Completed ? "#7B8C85" : overdue ? "#9E4338" : !view.Item.Deadline.Confirmed || soon ? "#825A22" : "#216E5B";
-            view.Surface.Background = UI.Brush(background); view.Label.Foreground = UI.Brush(foreground);
+            view.Surface.Background = UI.Brush(CalendarPalette.DeadlineBackground(view.Item, now));
+            view.Label.Foreground = UI.Brush(CalendarPalette.DeadlineForeground(view.Item, now));
             view.Button.ToolTip = view.Item.Title + "\n" + Deadlines.Description(view.Item, now);
         }
         public void Edit(Todo item)

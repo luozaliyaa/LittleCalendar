@@ -1100,6 +1100,19 @@ internal static class CalendarTests
             Throws(delegate { AgentSummaries.Parse("{\"overview\":\"缺少列表\"}"); });
             Throws(delegate { AgentSummaries.Parse("not json"); });
         });
+        Test("agent card projection turns long model output into a compact priority brief", delegate {
+            var summary = new AgentSummary {
+                Overview = new string('长', 500),
+                Today = new List<string> { "完成在线测评", "确认面试链接" },
+                Upcoming = new List<string> { "准备群面", "整理项目经历" },
+                Risks = new List<string> { "在线测评将在 24 小时内截止", "面试时间待确认" }
+            };
+            AgentCardProjection view = AgentCardProjection.From(summary);
+            Check(view.Headline == "今天有 2 项需要优先处理", "Agent card headline did not foreground today's workload");
+            Check(view.Priorities.SequenceEqual(new[] { "完成在线测评", "确认面试链接", "准备群面" }), "Agent card did not limit priorities to three useful rows");
+            Check(view.Risk == "在线测评将在 24 小时内截止", "Agent card did not surface the first risk");
+            Check(!view.Headline.Contains("长") && view.Priorities.All(x => !x.Contains("长")), "Long overview leaked into the compact card");
+        });
         Test("daily agent runs once after configured time and never when disabled", delegate {
             var settings = new AgentSettings { Enabled = true, DailyTime = "09:00", LastAutomaticDate = "" };
             Check(!AgentSchedule.IsDue(settings, new DateTime(2026, 9, 7, 8, 59, 59)), "Agent ran before configured time");
@@ -1183,7 +1196,8 @@ internal static class CalendarTests
             using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0))) {
                 runtime.ShowMain(); Pump();
                 Check(Descendants(runtime.Window).OfType<Border>().Any(x => AutomationProperties.GetName(x) == "智能整理卡片"), "Main agent card is missing");
-                Check(Descendants(runtime.Window).OfType<TextBlock>().Any(x => x.Text.Contains("今天先完成笔试")), "Cached summary is not visible");
+                Check(Descendants(runtime.Window).OfType<TextBlock>().Any(x => x.Text == "今天有 1 项需要优先处理"), "Compact workload headline is not visible");
+                Check(Descendants(runtime.Window).OfType<TextBlock>().Any(x => x.Text.Contains("1  完成笔试") && x.Text.Contains("2  准备群面")), "Priorities are not presented as a short ordered list");
                 Check(Descendants(runtime.Window).OfType<Button>().Any(x => Equals(x.Content, "立即总结")), "Manual summary action is missing");
                 Capture(runtime.Window, "agent-card.png");
             }
@@ -1223,13 +1237,25 @@ internal static class CalendarTests
         Test("settings expose protected DeepSeek configuration without revealing saved key", delegate {
             string directory = Path.Combine(root, "agent-settings-ui"); var controller = new CalendarController(new CalendarStore(directory)); var secrets = new SecretStore(directory); secrets.Save("sk-never-show");
             var settings = new SettingsWindow(controller, delegate { }, secrets, new DeepSeekAgent()); string uiError = null;
-            settings.Loaded += delegate {
+            settings.ContentRendered += delegate {
                 try {
-                    Check(Find<CheckBox>(settings, x => AutomationProperties.GetName(x) == "启用每日智能整理").IsChecked == false, "Agent enabled state mismatch");
-                    Check(Find<TextBox>(settings, x => AutomationProperties.GetName(x) == "每日总结时间").Text == "09:00", "Daily summary time missing");
-                    Check(Find<TextBox>(settings, x => AutomationProperties.GetName(x) == "DeepSeek 模型").Text == "deepseek-v4-flash", "Default model missing");
-                    Check(Find<PasswordBox>(settings, x => AutomationProperties.GetName(x) == "DeepSeek API Key").Password == "", "Saved API key was revealed in the UI");
+                    Check(Descendants(settings).OfType<Grid>().Any(x => AutomationProperties.GetName(x) == "设置双栏布局"), "Settings did not use fixed navigation and content columns");
+                    Check(new[] { "提醒", "智能整理", "邮箱同步", "数据与系统" }.All(label => Descendants(settings).OfType<Button>().Any(x => AutomationProperties.GetName(x) == "设置导航 " + label)), "Settings navigation is incomplete");
+                    Find<Button>(settings, x => AutomationProperties.GetName(x) == "设置导航 智能整理").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                    CheckBox agentToggle = Descendants(settings).OfType<CheckBox>().FirstOrDefault(x => AutomationProperties.GetName(x) == "启用每日智能整理");
+                    Check(agentToggle != null && agentToggle.IsChecked == false, "Agent toggle is missing or enabled state mismatch");
+                    TextBox summaryTime = Descendants(settings).OfType<TextBox>().FirstOrDefault(x => AutomationProperties.GetName(x) == "每日总结时间");
+                    TextBox model = Descendants(settings).OfType<TextBox>().FirstOrDefault(x => AutomationProperties.GetName(x) == "DeepSeek 模型");
+                    Check(summaryTime != null, "Daily summary time control is missing after navigation");
+                    Check(model != null, "DeepSeek model control is missing after navigation");
+                    Check(summaryTime.Text == "09:00" && summaryTime.Width <= 120, "Daily summary time is missing or still oversized");
+                    Check(model.Text == "deepseek-v4-flash" && model.MaxWidth <= 360, "Default model is missing or still oversized");
+                    PasswordBox apiKey = Descendants(settings).OfType<PasswordBox>().FirstOrDefault(x => AutomationProperties.GetName(x) == "DeepSeek API Key");
+                    Check(apiKey != null && apiKey.Password == "", "Saved API key was revealed in the UI or its field is missing");
+                    Check(model.ActualWidth >= 280 && apiKey.ActualWidth >= 480, "Credential fields collapsed instead of using a practical compact width");
                     Check(Descendants(settings).OfType<Button>().Any(x => Equals(x.Content, "测试连接")) && Descendants(settings).OfType<Button>().Any(x => Equals(x.Content, "清除 Key")), "Key management actions are missing");
+                    Button saveSettings = Descendants(settings).OfType<Button>().FirstOrDefault(x => Equals(x.Content, "保存设置"));
+                    Check(saveSettings != null && saveSettings.ActualHeight > 0 && saveSettings.TranslatePoint(new Point(), settings).Y + saveSettings.ActualHeight <= settings.ActualHeight, "Fixed settings footer is outside the visible window");
                     Capture(settings, "agent-settings.png");
                     settings.Close();
                 } catch (Exception e) { uiError = e.ToString(); settings.Close(); }
@@ -1249,6 +1275,7 @@ internal static class CalendarTests
             string uiError = null;
             settings.ContentRendered += delegate {
                 try {
+                    Find<Button>(settings, x => AutomationProperties.GetName(x) == "设置导航 邮箱同步").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
                     Check(Find<TextBox>(settings, x => AutomationProperties.GetName(x) == "网易邮箱地址") != null, "Mail address field missing");
                     Check(Find<PasswordBox>(settings, x => AutomationProperties.GetName(x) == "网易邮箱授权码").Password == "", "Saved mail authorization code was revealed");
                     Check(Find<CheckBox>(settings, x => AutomationProperties.GetName(x) == "启用网易邮箱每日同步") != null, "Mail sync toggle missing");
@@ -1520,6 +1547,19 @@ internal static class CalendarTests
                 Check(Descendants(window).OfType<Button>().Any(button => Equals(button.Content, "对话助手")), "Calendar has no 对话助手 entry");
             } finally { window.Close(); }
         });
+        Test("calendar deadline palette uses status semantics instead of per-task random colors", delegate {
+            DateTime now = new DateTime(2026, 9, 11, 10, 0, 0);
+            Todo normal = DeadlineTask("2026-09-11T09:00:00+08:00", 72, "hours", true);
+            Todo soon = DeadlineTask("2026-09-11T09:00:00+08:00", 24, "hours", true);
+            Todo overdue = DeadlineTask("2026-09-09T09:00:00+08:00", 24, "hours", true);
+            Todo uncertain = DeadlineTask("2026-09-11T09:00:00+08:00", 72, "hours", false);
+            Todo completed = DeadlineTask("2026-09-11T09:00:00+08:00", 72, "hours", true); completed.Completed = true;
+            Check(CalendarPalette.DeadlineBackground(normal, now) == "#DCEFE8", "Normal deadline color is not calm green");
+            Check(CalendarPalette.DeadlineBackground(soon, now) == "#F5DEB7", "Soon deadline color is not amber");
+            Check(CalendarPalette.DeadlineBackground(overdue, now) == "#F3D7D2", "Overdue deadline color is not red");
+            Check(CalendarPalette.DeadlineBackground(uncertain, now) == "#F7E7C4", "Unconfirmed deadline color is not amber");
+            Check(CalendarPalette.DeadlineBackground(completed, now) == "#E1E7E4", "Completed deadline color is not gray");
+        });
         Test("chat window exposes accessible controls and prevents duplicate sends", delegate {
             Type type = typeof(CalendarWindow).Assembly.GetType("LittleCalendar.ChatWindow");
             Check(type != null, "ChatWindow is missing");
@@ -1639,7 +1679,7 @@ internal static class CalendarTests
             Func<bool> acquire = () => acquired;
             var settings = (SettingsWindow)constructor.Invoke(new object[] { controller, new Action(delegate { }), new SecretStore(directory), new FakeAgent(), state, secret, factory, null, acquire, new Action(() => releases++) });
             try {
-                settings.Show(); Pump();
+                settings.Show(); Pump(); Find<Button>(settings, button => AutomationProperties.GetName(button) == "设置导航 邮箱同步").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
                 var test = Find<Button>(settings, button => Equals(button.Content, "测试邮箱连接"));
                 test.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
                 Check(!factory.Client.Connected && releases == 0 && test.IsEnabled, "Denied mailbox gate still opened a connection");
@@ -1657,7 +1697,8 @@ internal static class CalendarTests
                 delegate(int days) { syncCalls++; }, delegate { return false; }, delegate { });
             stateStore.Save(new MailSyncState { Account = new MailAccountSettings { Address = "fictional-sync@163.com" }, Folders = new List<MailFolderState> { new MailFolderState { FolderId = "INBOX", LastUid = 99 } } });
             try {
-                settings.Show(); Pump(); Find<Button>(settings, button => Equals(button.Content, "立即同步邮件")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                settings.Show(); Pump(); Find<Button>(settings, button => AutomationProperties.GetName(button) == "设置导航 邮箱同步").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                Find<Button>(settings, button => Equals(button.Content, "立即同步邮件")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
                 Check(syncCalls == 0 && stateStore.Load().Folders.Single().LastUid == 99, "Denied settings sync rolled back a cursor or started another mailbox operation");
             } finally { settings.Close(); }
         });
@@ -1709,7 +1750,7 @@ internal static class CalendarTests
                 Capture(runtime.Window, "visual-calendar.png");
             }
         });
-        Test("normal deadline bars keep edge spacing and receive distinct stable colors", delegate {
+        Test("normal deadline bars keep edge spacing and share one semantic status color", delegate {
             DateTime now = new DateTime(2026, 9, 4, 10, 0, 0);
             var controller = new CalendarController(Store("visual-palette"));
             Todo first = DeadlineTask("2026-09-03T10:00:00+08:00", 96); first.Id = "palette-first"; first.Title = "蓝色期限";
@@ -1720,7 +1761,7 @@ internal static class CalendarTests
                 var bars = Descendants(runtime.Window).OfType<Button>().Where(x => (AutomationProperties.GetName(x) ?? "").StartsWith("期限横条 ")).ToList();
                 Check(bars.Count == 4 && bars.All(x => x.Margin.Left >= 8 && x.Margin.Right >= 8), "Deadline bar touches a date-cell edge");
                 var colors = bars.Select(x => ((SolidColorBrush)Descendants(x).OfType<Border>().First(y => y.CornerRadius.TopLeft == 5).Background).Color.ToString()).Distinct().ToList();
-                Check(colors.Count == 2, "Different normal deadlines share the same visual color");
+                Check(colors.Count == 1 && colors.Single() == "#FFDCEFE8", "Normal deadlines do not share the semantic green color");
             }
         });
         Test("busy day exposes a clear overflow action and opens every item in the side panel", delegate {

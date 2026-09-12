@@ -219,6 +219,32 @@ namespace LittleCalendar
         }
     }
 
+    public sealed class AgentCardProjection
+    {
+        public string Headline { get; private set; }
+        public List<string> Priorities { get; private set; }
+        public string Risk { get; private set; }
+        private AgentCardProjection() { Priorities = new List<string>(); Headline = ""; Risk = ""; }
+        public static AgentCardProjection From(AgentSummary summary)
+        {
+            var view = new AgentCardProjection();
+            if (summary == null) {
+                view.Headline = "让 DeepSeek 帮你梳理近期安排";
+                return view;
+            }
+            IEnumerable<string> today = summary.Today ?? Enumerable.Empty<string>();
+            IEnumerable<string> upcoming = summary.Upcoming ?? Enumerable.Empty<string>();
+            List<string> todayItems = today.Where(x => !String.IsNullOrWhiteSpace(x)).ToList();
+            List<string> upcomingItems = upcoming.Where(x => !String.IsNullOrWhiteSpace(x)).ToList();
+            view.Headline = todayItems.Count > 0 ? "今天有 " + todayItems.Count + " 项需要优先处理"
+                : upcomingItems.Count > 0 ? "近期有 " + upcomingItems.Count + " 项安排需要关注"
+                : "近期没有需要特别安排的事项";
+            view.Priorities = todayItems.Concat(upcomingItems).Take(3).ToList();
+            view.Risk = (summary.Risks ?? new List<string>()).FirstOrDefault(x => !String.IsNullOrWhiteSpace(x)) ?? "";
+            return view;
+        }
+    }
+
     public static class ChatLanguageReplies
     {
         public static ChatLanguageReply Parse(string content, ChatLanguageRequest request)
