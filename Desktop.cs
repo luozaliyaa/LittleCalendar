@@ -117,7 +117,7 @@ namespace LittleCalendar
         private readonly Button[] modes = new Button[3];
         private readonly MailStateStore mailStateStore;
         private readonly Grid backgroundLayer = new Grid { IsHitTestVisible = false, ClipToBounds = true };
-        private readonly Image backgroundImage = new Image { Stretch = Stretch.UniformToFill, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Effect = new BlurEffect { Radius = 2 } };
+        private readonly Image backgroundImage = new Image { Stretch = Stretch.UniformToFill, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
         private readonly Border backgroundOverlay = new Border();
         private Border agentCard;
         private Border calendarCard;
@@ -264,6 +264,7 @@ namespace LittleCalendar
             backgroundOverlay.Background = UI.Brush(palette.Canvas); backgroundOverlay.Opacity = String.IsNullOrWhiteSpace(settings.BackgroundFile) ? 1 : 0.42;
             backgroundImage.Opacity = settings.BackgroundOpacity / 100.0;
             backgroundImage.Stretch = settings.BackgroundMode == "contain" ? Stretch.Uniform : Stretch.UniformToFill;
+            backgroundImage.Effect = !String.IsNullOrWhiteSpace(settings.BackgroundFile) && settings.BackgroundBlurEnabled ? new BlurEffect { Radius = settings.BackgroundBlurRadius } : null;
             if (!String.Equals(appliedBackgroundFile, settings.BackgroundFile, StringComparison.Ordinal)) {
                 appliedBackgroundFile = settings.BackgroundFile;
                 backgroundImage.Source = AppearanceFiles.Load(System.IO.Path.GetDirectoryName(controller.Store.FilePath), settings.BackgroundFile);

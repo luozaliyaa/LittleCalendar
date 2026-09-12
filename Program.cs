@@ -87,6 +87,14 @@ namespace LittleCalendar
             panelOpacity.ValueChanged += delegate { panelOpacityValue.Text = ((int)panelOpacity.Value) + "%"; };
             var panelOpacityRow = new StackPanel { Orientation = Orientation.Horizontal }; panelOpacityRow.Children.Add(panelOpacity); panelOpacityValue.Margin = new Thickness(12, 0, 0, 0); panelOpacityRow.Children.Add(panelOpacityValue);
             panel.Children.Add(UI.Field("月历与侧栏清晰度", panelOpacityRow));
+            var backgroundBlur = UI.Option("◌", "启用背景磨砂", "背景磨砂"); backgroundBlur.IsChecked = savedAppearance.BackgroundBlurEnabled; panel.Children.Add(backgroundBlur);
+            var blurRadius = new Slider { Minimum = 0, Maximum = 12, TickFrequency = 1, IsSnapToTickEnabled = true, Value = savedAppearance.BackgroundBlurRadius, Width = 230, HorizontalAlignment = HorizontalAlignment.Left };
+            var blurRadiusValue = UI.Text(((int)blurRadius.Value) + "", 12, "#607873");
+            blurRadius.ValueChanged += delegate { blurRadiusValue.Text = ((int)blurRadius.Value) + ""; };
+            var blurRadiusRow = new StackPanel { Orientation = Orientation.Horizontal }; blurRadiusRow.Children.Add(blurRadius); blurRadiusValue.Margin = new Thickness(12, 0, 0, 0); blurRadiusRow.Children.Add(blurRadiusValue);
+            Action refreshBlurEnabled = () => blurRadius.IsEnabled = backgroundBlur.IsChecked == true;
+            backgroundBlur.Checked += delegate { refreshBlurEnabled(); }; backgroundBlur.Unchecked += delegate { refreshBlurEnabled(); }; refreshBlurEnabled();
+            panel.Children.Add(UI.Field("磨砂强度", blurRadiusRow));
             var backgroundMode = new ComboBox { HorizontalAlignment = HorizontalAlignment.Left, MinWidth = 220 };
             backgroundMode.Items.Add(new ComboBoxItem { Content = "铺满裁切（不拉伸）", Tag = "cover" });
             backgroundMode.Items.Add(new ComboBoxItem { Content = "完整显示（不拉伸）", Tag = "contain" });
@@ -104,7 +112,7 @@ namespace LittleCalendar
             }));
             backgroundActions.Children.Add(UI.Button("移除背景图", delegate { pendingBackgroundPath = ""; removeBackground = true; backgroundHint.Text = "保存设置后将移除背景图片。"; }));
             backgroundActions.Children.Add(UI.Button("恢复默认外观", delegate {
-                theme.SelectedIndex = 0; opacity.Value = 100; panelOpacity.Value = 86; backgroundMode.SelectedIndex = 0; pendingBackgroundPath = ""; removeBackground = true; backgroundHint.Text = "保存设置后恢复默认外观。";
+                theme.SelectedIndex = 0; opacity.Value = 100; panelOpacity.Value = 86; backgroundBlur.IsChecked = true; blurRadius.Value = 4; backgroundMode.SelectedIndex = 0; pendingBackgroundPath = ""; removeBackground = true; backgroundHint.Text = "保存设置后恢复默认外观。";
             }));
             panel.Children.Add(backgroundActions);
             panel = agentPanel;
@@ -272,6 +280,8 @@ namespace LittleCalendar
                         appearance.Theme = (string)((ComboBoxItem)theme.SelectedItem).Tag;
                         appearance.BackgroundOpacity = (int)opacity.Value;
                         appearance.PanelOpacity = (int)panelOpacity.Value;
+                        appearance.BackgroundBlurEnabled = backgroundBlur.IsChecked == true;
+                        appearance.BackgroundBlurRadius = (int)blurRadius.Value;
                         appearance.BackgroundMode = (string)((ComboBoxItem)backgroundMode.SelectedItem).Tag;
                         string importedBackground = "";
                         if (!String.IsNullOrWhiteSpace(pendingBackgroundPath)) {

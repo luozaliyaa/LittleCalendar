@@ -1009,6 +1009,13 @@ internal static class CalendarTests
             Check(property != null, "Appearance settings do not expose panel clarity");
             Check((int)property.GetValue(settings, null) == 86, "Older calendar data does not receive the readable panel clarity default");
         });
+        Test("appearance defaults background frosted glass for older calendar data", delegate {
+            var settings = new AppearanceSettings();
+            var enabled = typeof(AppearanceSettings).GetProperty("BackgroundBlurEnabled");
+            var radius = typeof(AppearanceSettings).GetProperty("BackgroundBlurRadius");
+            Check(enabled != null && radius != null, "Appearance settings do not expose background frosted glass");
+            Check((bool)enabled.GetValue(settings, null) && (int)radius.GetValue(settings, null) == 4, "Older calendar data does not receive the frosted glass defaults");
+        });
         Test("busy day exposes a clear overflow action and opens every item in the side panel", delegate {
             DateTime now = new DateTime(2026, 9, 4, 10, 0, 0);
             DateTime busyDay = new DateTime(2026, 9, 5);
