@@ -321,6 +321,12 @@ internal static class CalendarTests
             Check(!fallback.Deadline.Confirmed && fallback.EmailSource.DeadlineInferred, "Fallback deadline was not marked inferred");
             Throws(delegate { MailActionParser.Parse("{\"actionable\":true,\"title\":\"missing fields\"}"); });
         });
+        Test("absolute mail deadline without a valid start uses the mail time as its start", delegate {
+            MailAction action = MailActionParser.Parse("{\"disposition\":\"todo\",\"actionable\":true,\"category\":\"assessment\",\"title\":\"完成依爱消防测评\",\"notes\":\"\",\"important\":true,\"deadlineKind\":\"absolute\",\"deadlineStart\":\"2026-09-13T00:00:00+08:00\",\"deadlineEnd\":\"2026-09-13T00:00:00+08:00\",\"deadlineAmount\":0,\"deadlineUnit\":\"\",\"deadlineOriginalText\":\"请在 2026-09-13 00:00 前完成\",\"confidence\":0.97,\"reason\":\"邮件给出明确截止时间\"}");
+            var source = new MailMessageSnapshot { FolderId = "INBOX", UidValidity = 1, Uid = 2094, MessageId = "<eifire@example.com>", SentAt = "2026-09-11T10:21:28+08:00" };
+            Todo todo = MailDeadlineMapper.ToTodo(action, source, new DateTime(2026, 9, 12, 9, 0, 0));
+            Check(todo.Deadline.StartAt.StartsWith("2026-09-11T10:21:28") && Deadlines.End(todo.Deadline).ToString("o").StartsWith("2026-09-13T00:00:00"), "Absolute mail deadline did not fall back to the mail time when its start was invalid");
+        });
         Test("mail classification request disables DeepSeek thinking while summaries keep it enabled", delegate {
             string mailJson = DeepSeekRequestPayload.Build("deepseek-v4-flash", "system", "mail", 1200, true);
             string summaryJson = DeepSeekRequestPayload.Build("deepseek-v4-flash", "system", "summary", 1000, false);

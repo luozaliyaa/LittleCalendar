@@ -157,8 +157,12 @@ namespace LittleCalendar
             } else {
                 DateTimeOffset start, end;
                 if (action.DeadlineKind == "absolute") {
-                    start = String.IsNullOrWhiteSpace(action.DeadlineStart) ? sentAt : Deadlines.ParseInstant(action.DeadlineStart);
                     end = Deadlines.ParseInstant(action.DeadlineEnd);
+                    start = sentAt;
+                    if (!String.IsNullOrWhiteSpace(action.DeadlineStart)) {
+                        DateTimeOffset suppliedStart = Deadlines.ParseInstant(action.DeadlineStart);
+                        if (suppliedStart < end) start = suppliedStart;
+                    }
                 } else {
                     start = new DateTimeOffset(syncNow.Date);
                     end = new DateTimeOffset(syncNow.Date.AddDays(7).AddHours(23).AddMinutes(59));
@@ -239,7 +243,7 @@ namespace LittleCalendar
         }
         public MailAction Analyze(NormalizedMail mail, DateTime now, string apiKey, string model)
         {
-            string system = "你是求职邮件分流与行动项提取器。必须输出 disposition=todo、notice 或 ignore。只有邮件能证明用户已经投递或已进入招聘流程，并明确要求完成测评、笔试、面试、材料提交、时间确认、Offer答复等任务时，才使用 todo 且 actionable=true。邀请投递、邀您投递、岗位推荐、校招启动、招聘简章、宣讲会和招聘宣传属于 notice，不能进入日历，actionable=false。验证码、登录安全、普通广告、投递回执和无操作要求的进度通知使用 ignore。重复提醒仍输出同一个规范任务标题，供本地去重。必须严格遵循 JSON Schema，所有字段均不得为 null。notice 保留简洁 title 和 notes，category=other、deadlineKind=none。ignore 使用空 title/notes/reason。相对期限只允许 hours 或 days；绝对时间必须含时区。待办示例：{\"disposition\":\"todo\",\"actionable\":true,\"category\":\"assessment\",\"title\":\"完成在线测评\",\"notes\":\"使用邮件中的链接\",\"important\":true,\"deadlineKind\":\"relative\",\"deadlineStart\":\"\",\"deadlineEnd\":\"\",\"deadlineAmount\":48,\"deadlineUnit\":\"hours\",\"deadlineOriginalText\":\"邮件发送后48小时内\",\"confidence\":0.95,\"reason\":\"邮件明确要求完成测评\"}。机会通知示例：{\"disposition\":\"notice\",\"actionable\":false,\"category\":\"other\",\"title\":\"贝泰妮集团校园招聘岗位\",\"notes\":\"邮件邀请用户自行选择岗位投递\",\"important\":false,\"deadlineKind\":\"none\",\"deadlineStart\":\"\",\"deadlineEnd\":\"\",\"deadlineAmount\":0,\"deadlineUnit\":\"\",\"deadlineOriginalText\":\"\",\"confidence\":0.96,\"reason\":\"这是邀请投递，并非用户已进入招聘流程后的任务\"}。";
+            string system = "你是求职邮件分流与行动项提取器。必须输出 disposition=todo、notice 或 ignore。只有邮件能证明用户已经投递或已进入招聘流程，并明确要求完成测评、笔试、面试、材料提交、时间确认、Offer答复等任务时，才使用 todo 且 actionable=true。邀请投递、邀您投递、岗位推荐、校招启动、招聘简章、宣讲会和招聘宣传属于 notice，不能进入日历，actionable=false。验证码、登录安全、普通广告、投递回执和无操作要求的进度通知使用 ignore。重复提醒仍输出同一个规范任务标题，供本地去重。必须严格遵循 JSON Schema，所有字段均不得为 null。notice 保留简洁 title 和 notes，category=other、deadlineKind=none。ignore 使用空 title/notes/reason。相对期限只允许 hours 或 days；绝对时间必须含时区。若邮件只给出截止时间而未给出开始时间，deadlineStart 必须输出空字符串，系统会用邮件发送时间作为起算时间。待办示例：{\"disposition\":\"todo\",\"actionable\":true,\"category\":\"assessment\",\"title\":\"完成在线测评\",\"notes\":\"使用邮件中的链接\",\"important\":true,\"deadlineKind\":\"relative\",\"deadlineStart\":\"\",\"deadlineEnd\":\"\",\"deadlineAmount\":48,\"deadlineUnit\":\"hours\",\"deadlineOriginalText\":\"邮件发送后48小时内\",\"confidence\":0.95,\"reason\":\"邮件明确要求完成测评\"}。机会通知示例：{\"disposition\":\"notice\",\"actionable\":false,\"category\":\"other\",\"title\":\"贝泰妮集团校园招聘岗位\",\"notes\":\"邮件邀请用户自行选择岗位投递\",\"important\":false,\"deadlineKind\":\"none\",\"deadlineStart\":\"\",\"deadlineEnd\":\"\",\"deadlineAmount\":0,\"deadlineUnit\":\"\",\"deadlineOriginalText\":\"\",\"confidence\":0.96,\"reason\":\"这是邀请投递，并非用户已进入招聘流程后的任务\"}。";
             string input = json.Serialize(new {
                 currentTime = now.ToString("o"), sender = mail.Sender, subject = mail.Subject, sentAt = mail.SentAt,
                 body = mail.Text, calendar = mail.CalendarText, attachmentNames = mail.AttachmentNames
