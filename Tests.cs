@@ -590,14 +590,14 @@ internal static class CalendarTests
                 Check(mail.Runs == 1, "Manual mail sync action did not start the existing incremental sync workflow");
             }
         });
-        Test("agent card can switch from compact to detailed view", delegate {
-            var controller = new CalendarController(Store("agent-detail-toggle"));
-            controller.Commit(data => data.Agent.LastSummary = new AgentSummary { Overview = "先完成笔试", Today = new List<string> { "完成笔试" }, Upcoming = new List<string> { "准备群面" }, Risks = new List<string> { "确认链接" } });
+        Test("task list can switch from compact to detailed content", delegate {
+            var controller = new CalendarController(Store("task-detail-toggle"));
+            controller.AddMailTodo(new Todo { Id = "mail-task", Title = "完成测评", Date = "2026-09-07", Notes = "使用邮件里的测评链接", EmailSource = new EmailSource { EmailKey = "detail@example.com", Sender = "校园招聘 <campus@example.com>", Subject = "测评通知" } });
             using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0))) {
                 runtime.ShowMain(); Pump();
+                Check(!Descendants(runtime.Window).OfType<Button>().Any(x => Equals(x.Content, "打开原邮件")), "Compact task list leaked mail details");
                 Find<Button>(runtime.Window, x => Equals(x.Content, "详细")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
-                TextBlock details = Descendants(runtime.Window).OfType<TextBlock>().First(x => x.Text.Contains("完成笔试") && x.Text.Contains("准备群面"));
-                Check(details.Visibility == Visibility.Visible, "Agent card did not reveal details after the detailed-view action");
+                Check(Descendants(runtime.Window).OfType<Button>().Any(x => Equals(x.Content, "打开原邮件")), "Detailed task list did not reveal mail details");
             }
         });
         Test("header search is one compact control aligned with the action buttons", delegate {
@@ -693,6 +693,7 @@ internal static class CalendarTests
             controller.AddMailTodo(todo);
             var window = new CalendarWindow(controller, () => new DateTime(2026, 9, 8, 9, 0, 0));
             window.Show(); window.SelectDate(new DateTime(2026, 9, 8)); Pump();
+            Find<Button>(window, x => Equals(x.Content, "详细")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
             string visible = String.Join("\n", Descendants(window).OfType<TextBlock>().Select(x => x.Text));
             Check(visible.Contains("来自邮件") && visible.Contains("校园招聘") && visible.Contains("期限由系统推断"), "Mail source metadata was not visible on the todo card");
             Button sourceButton = Descendants(window).OfType<Button>().FirstOrDefault(x => Equals(x.Content, "打开原邮件"));
@@ -1227,6 +1228,7 @@ internal static class CalendarTests
             DateTime now = new DateTimeOffset(2026, 9, 3, 16, 0, 0, TimeSpan.FromHours(8)).LocalDateTime;
             using (var runtime = new CalendarRuntime(controller, () => now)) {
                 runtime.ShowMain(); runtime.Window.SelectDate(now.Date); Pump();
+                Find<Button>(runtime.Window, x => Equals(x.Content, "详细")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
                 var edit = Find<Button>(runtime.Window, x => Equals(x.Content, "编辑")); edit.Focus(); Pump();
                 runtime.Tick(); Pump();
                 Check(edit.IsKeyboardFocused, "Timer rebuilt the focused control");
