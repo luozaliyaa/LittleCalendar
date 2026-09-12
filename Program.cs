@@ -388,7 +388,7 @@ namespace LittleCalendar
             var mailDiagnostics = new MailDiagnosticLog(dataDirectory);
             this.mailSync = mailSync ?? new MailSyncCoordinator(controller, mailStateStore, mailSecrets, secrets,
                 mailFactory, new DeepSeekMailActionAnalyzer(this.workAgent as DeepSeekAgent ?? new DeepSeekAgent(), mailDiagnostics), this.clock, mailDiagnostics);
-            Window = new CalendarWindow(controller, this.clock); Window.SettingsRequested = OpenSettings; Window.AgentSummaryRequested = delegate { StartAgentSummary(false); };
+            Window = new CalendarWindow(controller, this.clock); Window.SettingsRequested = OpenSettings; Window.AgentSummaryRequested = delegate { StartAgentSummary(false); }; Window.MailSyncRequested = delegate { StartMailSync(false); };
             lastDay = this.clock().Date;
             icon = CreateIcon(); tray.Icon = icon; tray.Text = "小日历 · 双击查看待办"; tray.Visible = true;
             Window.Icon = Imaging.CreateBitmapSourceFromHIcon(icon.Handle, Int32Rect.Empty, System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
@@ -443,16 +443,17 @@ namespace LittleCalendar
         {
             if (exiting || sessionLocked || mailBusy) return;
             if (automatic && !mailSync.IsDue(clock())) return;
-            mailBusy = true; Window.SetAgentBusy(true, automatic ? "正在同步招聘邮件…" : "正在读取邮箱…");
+            mailBusy = true; Window.SetMailSyncBusy(true, automatic ? "正在同步招聘邮件…" : "正在从上次同步位置读取邮件…");
             ThreadPool.QueueUserWorkItem(delegate {
                 MailSyncResult result = null; Exception error = null;
                 try { result = mailSync.Run(automatic, days); }
                 catch (Exception e) { error = e; }
                 Window.Dispatcher.BeginInvoke(new Action(delegate {
                     try {
-                        if (error == null && result.Errors.Count == 0) Window.SetAgentBusy(false, "邮箱同步完成，新增 " + result.CreatedCount + " 项待办");
-                        else if (error == null) Window.SetAgentBusy(false, "邮箱同步部分完成：新增 " + result.CreatedCount + " 项，" + result.Errors.Count + " 处失败；详情见邮箱日志");
-                        else Window.SetAgentBusy(false, "邮箱同步失败：" + error.Message);
+                        if (error == null && result.Errors.Count == 0) Window.SetMailSyncBusy(false, "邮箱同步完成，新增 " + result.CreatedCount + " 项待办");
+                        else if (error == null) Window.SetMailSyncBusy(false, "邮箱同步部分完成：新增 " + result.CreatedCount + " 项，" + result.Errors.Count + " 处失败；详情见邮箱日志");
+                        else Window.SetMailSyncBusy(false, "邮箱同步失败：" + error.Message);
+                        Window.Refresh();
                     } finally {
                         mailBusy = false;
                         StartAgentSummary(automatic);

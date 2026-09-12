@@ -570,6 +570,36 @@ internal static class CalendarTests
                 Capture(runtime.Window, "agent-card.png");
             }
         });
+        Test("right-panel task counts exclude completed todos", delegate {
+            var controller = new CalendarController(Store("pending-task-counts"));
+            controller.SaveTodo(new Todo { Id = "unfinished", Title = "待完成", Date = "2026-09-07" });
+            controller.SaveTodo(new Todo { Id = "finished", Title = "已完成", Date = "2026-09-07", Completed = true });
+            using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0))) {
+                runtime.ShowMain(); Pump();
+                var labels = Descendants(runtime.Window).OfType<Button>().Select(x => x.Content as string).ToList();
+                Check(labels.Contains("当日（1）") && labels.Contains("全部（1）"), "Right-panel task counts include completed todos");
+            }
+        });
+        Test("main calendar offers a manual incremental mail sync action", delegate {
+            var controller = new CalendarController(Store("manual-mail-sync-action"));
+            var order = new List<string>(); var mail = new FakeDailyMailSync(order);
+            using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0), new OrderedAgent(order), mail)) {
+                runtime.ShowMain(); Pump();
+                Find<Button>(runtime.Window, x => Equals(x.Content, "同步邮件")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                WaitUntil(delegate { return mail.Runs == 1; });
+                Check(mail.Runs == 1, "Manual mail sync action did not start the existing incremental sync workflow");
+            }
+        });
+        Test("agent card can switch from compact to detailed view", delegate {
+            var controller = new CalendarController(Store("agent-detail-toggle"));
+            controller.Commit(data => data.Agent.LastSummary = new AgentSummary { Overview = "先完成笔试", Today = new List<string> { "完成笔试" }, Upcoming = new List<string> { "准备群面" }, Risks = new List<string> { "确认链接" } });
+            using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0))) {
+                runtime.ShowMain(); Pump();
+                Find<Button>(runtime.Window, x => Equals(x.Content, "详细")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
+                TextBlock details = Descendants(runtime.Window).OfType<TextBlock>().First(x => x.Text.Contains("完成笔试") && x.Text.Contains("准备群面"));
+                Check(details.Visibility == Visibility.Visible, "Agent card did not reveal details after the detailed-view action");
+            }
+        });
         Test("header search is one compact control aligned with the action buttons", delegate {
             var controller = new CalendarController(Store("compact-search"));
             using (var runtime = new CalendarRuntime(controller, () => new DateTime(2026, 9, 7, 10, 0, 0))) {
